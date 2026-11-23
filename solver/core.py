@@ -243,7 +243,7 @@ class TurnstileSolver:
         html = render_html(config)
 
         with sync_playwright() as p:
-            browser = self._launcher.launch(playwright, proxy=proxy)
+            browser = self._launcher.launch(p, proxy=proxy)
             try:
                 page = browser.new_page()
                 # Route interception: serve our HTML when the browser
