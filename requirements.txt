@@ -1,9 +1,9 @@
 # Lucid Turnstile Solver - pinned dependencies
-# Python 3.11 / Debian slim
+# Compatible with Python 3.11 through 3.14 (wheels available for all).
 
-fastapi==0.115.6
-uvicorn[standard]==0.32.1
-pydantic==2.10.3
-DrissionPage==4.1.0.18
-requests==2.32.3
-websockets==13.1
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.4
+DrissionPage==4.1.1.4
+requests==2.34.2
+websockets==17.4
