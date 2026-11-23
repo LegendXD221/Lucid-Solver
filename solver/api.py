@@ -2,13 +2,18 @@
 
 Endpoints
 ---------
-``POST /solve``    Solve a Turnstile challenge.  Body: ``{url, sitekey, proxy?, widget_type?, action?}``.
+``POST /solve``    Solve a Turnstile challenge.  Body supports url, sitekey,
+                   proxy, widget_type, action, cdata, theme, size, language,
+                   appearance, execution.
 ``GET  /health``   Liveness probe with uptime and total solve count.
-``GET  /stats``    Aggregate metrics: success rate, average latency, error counts.
+``GET  /stats``    Aggregate metrics: success rate, average latency, errors.
+
+The ``/solve`` handler is a **sync** function (``def``, not ``async def``).
+FastAPI automatically runs sync endpoints in a threadpool, which is the
+correct concurrency model for sync patchright/Playwright calls.
 
 Configuration is 100% environment driven - see ``.env.example``.  When
-``API_KEY`` is set, every request must carry ``X-API-Key: <value>``; when
-unset the service runs in open mode.
+``API_KEY`` is set, every request must carry ``X-API-Key: <value>``.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ import sys
 import threading
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -53,7 +58,6 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "msg": record.getMessage(),
         }
-        # Pull in structured extras (anything the caller added via extra=...).
         for key, value in record.__dict__.items():
             if key not in self._SYS_ATTRS and not key.startswith("_"):
                 payload[key] = value
@@ -68,8 +72,7 @@ def _configure_logging() -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(_LOG_LEVEL)
-    # Quieten noisy libraries but keep our own logs loud.
-    for noisy in ("urllib3", "DrissionPage", "asyncio", "watchfiles"):
+    for noisy in ("urllib3", "patchright", "playwright", "asyncio", "watchfiles"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
@@ -82,13 +85,7 @@ logger = logging.getLogger("solver.api")
 # ---------------------------------------------------------------------------
 
 class _Metrics:
-    """In-process metrics counter, thread-safe.
-
-    With multiple Uvicorn workers each process keeps its own counters; the
-    ``/stats`` endpoint reports the view from the current worker.  For a
-    shared view put the service behind a load balancer with Prometheus-style
-    scraping or swap this out for Redis.
-    """
+    """In-process metrics counter, thread-safe."""
 
     def __init__(self, history: int = 500) -> None:
         self._lock = threading.Lock()
@@ -98,6 +95,7 @@ class _Metrics:
         self._solves_failed = 0
         self._latencies_ms: Deque[int] = deque(maxlen=history)
         self._errors: Dict[str, int] = {}
+        self._widget_types: Dict[str, int] = {}
         self._last_solve: Optional[Dict[str, Any]] = None
 
     def record(self, result: Dict[str, Any]) -> None:
@@ -106,18 +104,20 @@ class _Metrics:
             elapsed = int(result.get("elapsed_ms", 0))
             self._latencies_ms.append(elapsed)
             status = result.get("status")
+            wt = result.get("widget_type", "managed")
+            self._widget_types[wt] = self._widget_types.get(wt, 0) + 1
             if status == "success":
                 self._solves_success += 1
             else:
                 self._solves_failed += 1
                 err = result.get("error") or "unknown"
-                # Bucket the error by type prefix.
                 bucket = err.split(":", 1)[0].strip()
                 self._errors[bucket] = self._errors.get(bucket, 0) + 1
             self._last_solve = {
                 "status": status,
                 "elapsed_ms": elapsed,
                 "attempts": result.get("attempts"),
+                "widget_type": wt,
                 "ts": round(time.time(), 3),
             }
 
@@ -137,6 +137,7 @@ class _Metrics:
                 "success_rate_pct": success_rate,
                 "avg_ms": avg_ms,
                 "errors": dict(self._errors),
+                "widget_types": dict(self._widget_types),
                 "last_solve": self._last_solve,
             }
 
@@ -154,7 +155,7 @@ _API_KEY = os.getenv("API_KEY", "").strip() or None
 
 def _verify_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
     if _API_KEY is None:
-        return  # Open mode - no auth required.
+        return
     if not x_api_key or x_api_key != _API_KEY:
         raise HTTPException(status_code=401, detail="invalid or missing X-API-Key")
 
@@ -163,33 +164,74 @@ def _verify_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
 # Pydantic models
 # ---------------------------------------------------------------------------
 
+_WIDGET_TYPES = ("managed", "non-interactive", "invisible")
+_THEMES = ("auto", "light", "dark")
+_SIZES = ("normal", "flexible", "compact")
+_APPEARANCES = ("always", "execute", "interaction-only")
+_EXECUTIONS = ("render", "execute")
+
+
 class SolveRequest(BaseModel):
     url: str = Field(..., description="Target URL registered with the sitekey.")
     sitekey: str = Field(..., description="Cloudflare Turnstile sitekey (0x...).")
-    proxy: Optional[str] = Field(
-        None, description="Override proxy for this request (http/https/socks5)."
-    )
-    widget_type: str = Field(
-        "managed",
-        description="Widget type: managed | non-interactive | invisible.",
-    )
-    action: Optional[str] = Field(None, description="Optional Turnstile action value.")
-    use_pool_proxy: bool = Field(
-        False, description="If true and no proxy is set, rotate one from PROXY_LIST.",
-    )
+    proxy: Optional[str] = Field(None, description="Per-request proxy override.")
+    widget_type: str = Field("managed", description="managed | non-interactive | invisible")
+    action: Optional[str] = Field(None, description="Turnstile action embedded in token.")
+    cdata: Optional[str] = Field(None, description="Custom data echoed back by siteverify.")
+    theme: str = Field("auto", description="auto | light | dark")
+    size: str = Field("normal", description="normal | flexible | compact")
+    language: str = Field("auto", description="auto or ISO 639-1 code.")
+    appearance: Optional[str] = Field(None, description="Override: always | execute | interaction-only")
+    execution: Optional[str] = Field(None, description="Override: render | execute")
+    use_pool_proxy: bool = Field(False, description="Rotate a proxy from PROXY_LIST when proxy is unset.")
 
     @field_validator("widget_type")
     @classmethod
-    def _validate_widget(cls, v: str) -> str:
+    def _v_widget(cls, v: str) -> str:
         v = (v or "managed").strip().lower()
-        allowed = ("managed", "non-interactive", "invisible")
-        if v not in allowed:
-            raise ValueError(f"widget_type must be one of {allowed}")
+        if v not in _WIDGET_TYPES:
+            raise ValueError(f"widget_type must be one of {_WIDGET_TYPES}")
+        return v
+
+    @field_validator("theme")
+    @classmethod
+    def _v_theme(cls, v: str) -> str:
+        v = (v or "auto").strip().lower()
+        if v not in _THEMES:
+            raise ValueError(f"theme must be one of {_THEMES}")
+        return v
+
+    @field_validator("size")
+    @classmethod
+    def _v_size(cls, v: str) -> str:
+        v = (v or "normal").strip().lower()
+        if v not in _SIZES:
+            raise ValueError(f"size must be one of {_SIZES}")
+        return v
+
+    @field_validator("appearance")
+    @classmethod
+    def _v_appearance(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip().lower()
+        if v not in _APPEARANCES:
+            raise ValueError(f"appearance must be one of {_APPEARANCES}")
+        return v
+
+    @field_validator("execution")
+    @classmethod
+    def _v_execution(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip().lower()
+        if v not in _EXECUTIONS:
+            raise ValueError(f"execution must be one of {_EXECUTIONS}")
         return v
 
     @field_validator("sitekey")
     @classmethod
-    def _validate_sitekey(cls, v: str) -> str:
+    def _v_sitekey(cls, v: str) -> str:
         v = (v or "").strip()
         if not v:
             raise ValueError("sitekey is required")
@@ -197,7 +239,7 @@ class SolveRequest(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def _validate_url(cls, v: str) -> str:
+    def _v_url(cls, v: str) -> str:
         v = (v or "").strip()
         if not v:
             raise ValueError("url is required")
@@ -231,6 +273,7 @@ class StatsResponse(BaseModel):
     solves_success: int
     solves_failed: int
     errors: Dict[str, int]
+    widget_types: Dict[str, int]
     uptime_s: float
     last_solve: Optional[Dict[str, Any]] = None
 
@@ -242,8 +285,8 @@ class StatsResponse(BaseModel):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Lucid Turnstile Solver",
-        version="1.0.0",
-        description="Cloudflare Turnstile token solver API (DrissionPage based).",
+        version="2.0.0",
+        description="Cloudflare Turnstile token solver API (patchright-based, all widget types).",
         docs_url="/docs",
         redoc_url=None,
     )
@@ -285,6 +328,7 @@ def create_app() -> FastAPI:
             solves_success=snap["solves_success"],
             solves_failed=snap["solves_failed"],
             errors=snap["errors"],
+            widget_types=snap["widget_types"],
             uptime_s=snap["uptime_s"],
             last_solve=snap["last_solve"],
         )
@@ -295,8 +339,9 @@ def create_app() -> FastAPI:
         tags=["solver"],
         dependencies=[Depends(_verify_api_key)],
     )
-    async def solve(req: SolveRequest) -> SolveResponse:
-        # Proxy resolution priority: explicit > pool rotation > none.
+    # NOTE: ``def`` (not ``async def``) — FastAPI runs sync endpoints in a
+    # threadpool, which is the correct model for sync patchright calls.
+    def solve(req: SolveRequest) -> SolveResponse:
         proxy = req.proxy
         if not proxy and req.use_pool_proxy:
             proxy = proxy_manager.rotate()
@@ -309,6 +354,8 @@ def create_app() -> FastAPI:
                 "url": req.url,
                 "sitekey": req.sitekey[:10] + "...",
                 "widget_type": req.widget_type,
+                "theme": req.theme,
+                "size": req.size,
                 "proxy": bool(proxy),
             },
         )
@@ -320,12 +367,17 @@ def create_app() -> FastAPI:
             proxy=proxy,
             widget_type=req.widget_type,
             action=req.action,
+            cdata=req.cdata,
+            theme=req.theme,
+            size=req.size,
+            language=req.language,
+            appearance=req.appearance,
+            execution=req.execution,
         )
         metrics.record(result)
 
         status = result.get("status", "failed")
         if status != "success":
-            # 502 lets upstream callers retry cleanly without parsing bodies.
             return JSONResponse(
                 status_code=502,
                 content=SolveResponse(**result).model_dump(),
@@ -336,7 +388,7 @@ def create_app() -> FastAPI:
     async def root() -> Dict[str, str]:
         return {
             "service": "lucid-turnstile-solver",
-            "version": "1.0.0",
+            "version": "2.0.0",
             "docs": "/docs",
             "health": "/health",
         }
@@ -346,7 +398,6 @@ def create_app() -> FastAPI:
 
 app = create_app()
 
-# Log a startup banner so the very first JSON line explains the running config.
 logger.info(
     "api_started",
     extra={
@@ -356,6 +407,7 @@ logger.info(
         "headless": os.getenv("HEADLESS", "true").lower() in ("1", "true", "yes", "on"),
         "max_retries": int(os.getenv("MAX_RETRIES", "3")),
         "solve_timeout": int(os.getenv("SOLVE_TIMEOUT", "30")),
+        "browser_type": os.getenv("BROWSER_TYPE", "chromium"),
     },
 )
 
@@ -368,5 +420,5 @@ if __name__ == "__main__":
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8000")),
         workers=int(os.getenv("WORKERS", "4")),
-        log_config=None,  # we use our own JSON formatter
+        log_config=None,
     )

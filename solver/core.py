@@ -1,101 +1,153 @@
-"""Turnstile solver core.
+"""Turnstile solver core - patchright-based.
 
-Implements :class:`TurnstileSolver`, a DrissionPage based solver that renders
-the Cloudflare Turnstile widget on a generated local HTML page, waits for the
-callback to fire, and returns the resulting ``cf-turnstile-response`` token.
+Based on the reference implementation at github.com/Theyka/Turnstile-Solver,
+updated to support **every** Cloudflare Turnstile widget type and all
+client-side configuration options.
 
-The approach follows the reference implementation at
-``github.com/Theyka/Turnstile-Solver``:
+Key techniques
+--------------
+1. **Route interception** — instead of loading a ``file://`` page, the solver
+   intercepts requests to the *target URL* and fulfills them with a custom
+   HTML page.  Cloudflare sees the correct ``Origin`` / ``Referer``, which is
+   critical for sitekeys with domain verification enabled.
 
-1. Build an HTML page embedding the Turnstile JS bundle and the supplied
-   ``sitekey``.
-2. Spin up a headless Chromium instance through DrissionPage, optionally
-   routing traffic through a proxy.
-3. Poll ``window.__tsToken`` until the widget calls back with a token, or
-   until the per-attempt timeout elapses.
-4. Retry up to ``max_retries`` times before giving up.
+2. **Explicit ``turnstile.render()``** — the HTML uses the JavaScript API
+   rather than the declarative ``<div class="cf-turnstile">`` so we can pass
+   ``appearance`` and ``execution`` per widget type:
+     * ``managed``         → appearance=always,    execution=render
+     * ``non-interactive`` → appearance=always,    execution=render
+     * ``invisible``       → appearance=execute,   execution=execute (+ turnstile.execute())
+
+3. **patchright** — a patched fork of Playwright that strips automation
+   fingerprints (``navigator.webdriver``, CDP artifacts, etc.) so Cloudflare's
+   bot detection has a harder time distinguishing the browser from a real user.
+
+4. **Dual token extraction** — polls both the ``callback``-populated
+   ``window.__tsToken`` variable and the ``[name=cf-turnstile-response]``
+   hidden input that Turnstile creates.  Either signal is sufficient.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-import tempfile
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
+from urllib.parse import urlparse, unquote
 
-from DrissionPage import Chromium, ChromiumOptions
-from DrissionPage._units.listener import Listener  # noqa: F401  (type only)
+from patchright.sync_api import sync_playwright, Browser, Page
 
 logger = logging.getLogger("solver.core")
 
 # ---------------------------------------------------------------------------
-# Widget templates
+# Default user-agent - a realistic desktop Chrome UA.  Patchright already
+# strips ``HeadlessChrome`` from the UA, but setting an explicit one avoids
+# any residual fingerprint.
 # ---------------------------------------------------------------------------
 
-# Placeholders are replaced via str.replace() in _write_html() to avoid
-# conflicts between JavaScript object braces and str.format() syntax.
+DEFAULT_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+# ---------------------------------------------------------------------------
+# Widget type → default appearance / execution mapping.
+#
+# The widget type is fundamentally a server-side property of the sitekey
+# (configured in the Cloudflare dashboard).  The client controls two related
+# options that determine how the widget behaves on the page:
+#
+#   * ``appearance`` — when the widget is *visible*:
+#       - ``always``           visible as soon as it renders
+#       - ``execute``          visible only while a challenge is executing
+#       - ``interaction-only`` visible only when user interaction is required
+#
+#   * ``execution`` — when the challenge *runs*:
+#       - ``render``   runs automatically on render
+#       - ``execute``  runs only when ``turnstile.execute(widgetId)`` is called
+#
+# For invisible sitekeys the client MUST use execution=execute and call
+# ``turnstile.execute()``; otherwise no challenge runs and no token is issued.
+# ---------------------------------------------------------------------------
+
+WIDGET_TYPE_CONFIG: Dict[str, Dict[str, str]] = {
+    "managed":         {"appearance": "always",  "execution": "render"},
+    "non-interactive": {"appearance": "always",  "execution": "render"},
+    "invisible":       {"appearance": "execute", "execution": "execute"},
+}
+
+# ---------------------------------------------------------------------------
+# HTML template.  Configuration is injected as a JSON blob so we never have
+# to worry about brace-escaping (the JS object literals use { } freely).
+# ---------------------------------------------------------------------------
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Turnstile Solver</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Just a moment...</title>
     <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=__tsLoad" async defer></script>
     <script>
         window.__tsToken = null;
         window.__tsError = null;
-        window.__tsReady = false;
         window.__tsWidgetId = null;
-        window.__tsWidgetType = "__WIDGET_TYPE__";
+        window.__tsReady = false;
+        window.__tsExecuted = false;
+        window.__tsConfig = __CONFIG_JSON__;
 
         function __tsLoad() {
             try {
-                var cfg = {
-                    sitekey: "__SITEKEY__",
-                    action: "__ACTION__",
+                // Merge caller config over the callback wiring.  Caller
+                // provides sitekey/appearance/execution/etc.; we always
+                // supply the callback hooks so Python can observe state.
+                var cfg = Object.assign({
                     callback: function(token) { window.__tsToken = token; },
-                    "error-callback": function(code) { window.__tsError = String(code || "error"); },
-                    "expired-callback": function() { window.__tsError = "expired"; window.__tsToken = null; },
-                    "timeout-callback": function() { window.__tsError = "timeout"; }
-                };
+                    'error-callback': function(code) {
+                        window.__tsError = 'error:' + String(code || 'unknown');
+                    },
+                    'expired-callback': function() {
+                        window.__tsError = 'expired';
+                        window.__tsToken = null;
+                    },
+                    'timeout-callback': function() {
+                        window.__tsError = 'timeout';
+                    },
+                    'unsupported-callback': function() {
+                        window.__tsError = 'unsupported';
+                    }
+                }, window.__tsConfig);
 
-                if (window.__tsWidgetType === "invisible") {
-                    cfg.appearance = "execute";
-                } else if (window.__tsWidgetType === "non-interactive") {
-                    cfg.appearance = "always";
-                } else {
-                    cfg.appearance = "always";
-                }
-
-                window.__tsWidgetId = turnstile.render("#cf-turnstile", cfg);
+                window.__tsWidgetId = turnstile.render('#cf-turnstile', cfg);
                 window.__tsReady = true;
 
-                if (window.__tsWidgetType === "invisible") {
+                // Invisible / execute widgets need an explicit execute()
+                // call to start the challenge.  Delay slightly so the widget
+                // is fully mounted first.
+                var needsExecute = (cfg.execution === 'execute')
+                    || (cfg.appearance === 'execute');
+                if (needsExecute) {
                     setTimeout(function() {
-                        try { turnstile.execute(window.__tsWidgetId); }
-                        catch (e) { window.__tsError = "execute:" + e.message; }
-                    }, 400);
+                        try {
+                            turnstile.execute(window.__tsWidgetId);
+                            window.__tsExecuted = true;
+                        } catch (e) {
+                            window.__tsError = 'execute:' + e.message;
+                        }
+                    }, 300);
                 }
             } catch (e) {
-                window.__tsError = "load:" + e.message;
+                window.__tsError = 'load:' + e.message;
             }
         }
     </script>
 </head>
 <body>
-    <div id="cf-turnstile" data-sitekey="__SITEKEY__"></div>
+    <div id="cf-turnstile"></div>
 </body>
 </html>"""
-
-# Default user-agent that plays nicely with Cloudflare - overridden at runtime
-# by Chromium's own UA unless ``useragent`` is explicitly supplied.
-DEFAULT_UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +167,7 @@ class SolveResult:
     extra: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        payload = {
+        payload: Dict[str, Any] = {
             "token": self.token,
             "elapsed_ms": self.elapsed_ms,
             "useragent": self.useragent,
@@ -137,27 +189,28 @@ class SolveResult:
 # ---------------------------------------------------------------------------
 
 class TurnstileSolver:
-    """Solve Cloudflare Turnstile challenges using DrissionPage.
+    """Solve Cloudflare Turnstile challenges using patchright.
 
     Parameters
     ----------
     headless:
-        Run Chromium without a visible window (default ``True``).
+        Run the browser without a visible window (default ``True``).
     max_retries:
         Number of attempts before giving up (default ``3``).
     timeout:
         Per-attempt timeout in seconds (default ``30``).
     useragent:
-        Force a specific user-agent string.  When ``None`` Chromium's default
-        is used.
+        Override the browser user-agent.  Defaults to a realistic Chrome UA.
+    browser_type:
+        One of ``chromium`` (patchright's patched build, best anti-detection),
+        ``chrome`` (system Google Chrome), ``msedge`` (system Edge).
+        Default ``chromium``.
     browser_path:
-        Path to a Chromium binary.  When ``None`` DrissionPage auto-detects.
-    tmp_dir:
-        Directory used to drop the generated HTML file.  Defaults to the
-        system temp directory.
+        Explicit path to a browser binary.  Overrides ``browser_type``.
     """
 
     WIDGET_TYPES = ("managed", "non-interactive", "invisible")
+    BROWSER_TYPES = ("chromium", "chrome", "msedge")
 
     def __init__(
         self,
@@ -165,21 +218,24 @@ class TurnstileSolver:
         max_retries: int = 3,
         timeout: int = 30,
         useragent: Optional[str] = None,
+        browser_type: str = "chromium",
         browser_path: Optional[str] = None,
-        tmp_dir: Optional[str | Path] = None,
     ) -> None:
         self.headless = self._env_bool("HEADLESS", headless)
         self.max_retries = int(os.getenv("MAX_RETRIES", max_retries))
         self.timeout = int(os.getenv("SOLVE_TIMEOUT", timeout))
-        self.useragent = useragent or os.getenv("USER_AGENT")
-        self.browser_path = browser_path or os.getenv("CHROMIUM_PATH")
-        self.tmp_dir = Path(tmp_dir or os.getenv("TMP_DIR", tempfile.gettempdir()))
-        self.tmp_dir.mkdir(parents=True, exist_ok=True)
+        self.useragent = useragent or os.getenv("USER_AGENT") or DEFAULT_UA
+        self.browser_type = os.getenv("BROWSER_TYPE", browser_type) or "chromium"
+        self.browser_path = browser_path or os.getenv("CHROMIUM_PATH") or os.getenv("BROWSER_PATH")
+
+        if self.browser_type not in self.BROWSER_TYPES:
+            logger.warning("unsupported browser_type=%s, falling back to chromium", self.browser_type)
+            self.browser_type = "chromium"
 
         logger.info(
-            "solver_initialized headless=%s retries=%d timeout=%s ua=%s browser=%s",
+            "solver_initialized headless=%s retries=%d timeout=%s browser=%s ua=%s",
             self.headless, self.max_retries, self.timeout,
-            bool(self.useragent), bool(self.browser_path),
+            self.browser_type, bool(self.useragent),
         )
 
     # ------------------------------------------------------------------ #
@@ -192,30 +248,51 @@ class TurnstileSolver:
         proxy: Optional[str] = None,
         widget_type: str = "managed",
         action: Optional[str] = None,
+        cdata: Optional[str] = None,
+        theme: str = "auto",
+        size: str = "normal",
+        language: str = "auto",
+        appearance: Optional[str] = None,
+        execution: Optional[str] = None,
     ) -> dict:
         """Attempt to solve a Turnstile challenge.
 
         Parameters
         ----------
         url:
-            The target URL.  Used as a referrer hint for Cloudflare; the
-            widget itself is always rendered on a generated local HTML page
-            so we fully control the DOM.
+            Target URL registered with the sitekey.  The solver intercepts
+            navigation to this URL and serves a custom HTML page, so
+            Cloudflare sees the correct origin.
         sitekey:
             The Turnstile sitekey (``0x4AAAA...``).
         proxy:
             Optional proxy URL (``http://``, ``https://``, ``socks5://``).
-            Credentials may be embedded: ``http://user:pass@host:port``.
+            Credentials: ``http://user:pass@host:port``.
         widget_type:
             One of ``managed``, ``non-interactive``, ``invisible``.
+            Determines default ``appearance``/``execution``; overridable.
         action:
-            Optional Turnstile ``action`` string embedded in the token.
+            Optional Turnstile ``action`` embedded in the token.
+        cdata:
+            Optional custom data Cloudflare echoes back in the siteverify
+            response.
+        theme:
+            ``auto``, ``light``, ``dark``.
+        size:
+            ``normal``, ``flexible``, ``compact``.
+        language:
+            ``auto`` or an ISO 639-1 code (``en``, ``fr``, ...).
+        appearance:
+            Override the widget-type default: ``always``, ``execute``,
+            ``interaction-only``.
+        execution:
+            Override the widget-type default: ``render``, ``execute``.
 
         Returns
         -------
         dict
             ``{token, elapsed_ms, useragent, status, attempts, widget_type}``
-            plus ``error``/``proxy_used`` when relevant.
+            plus ``error`` / ``proxy_used`` when relevant.
         """
         if widget_type not in self.WIDGET_TYPES:
             raise ValueError(
@@ -244,7 +321,13 @@ class TurnstileSolver:
                     sitekey=sitekey,
                     proxy=last_proxy,
                     widget_type=widget_type,
-                    action=action or "",
+                    action=action,
+                    cdata=cdata,
+                    theme=theme,
+                    size=size,
+                    language=language,
+                    appearance=appearance,
+                    execution=execution,
                 )
                 elapsed_ms = int((time.monotonic() - started) * 1000)
                 result = SolveResult(
@@ -261,7 +344,7 @@ class TurnstileSolver:
                     attempt, elapsed_ms, len(token or ""),
                 )
                 return result.to_dict()
-            except Exception as exc:  # noqa: BLE001 - we want to capture all
+            except Exception as exc:  # noqa: BLE001 - capture everything for retries
                 attempt_ms = int((time.monotonic() - attempt_started) * 1000)
                 last_error = f"{type(exc).__name__}: {exc}"
                 last_ua = getattr(exc, "useragent", None) or last_ua
@@ -269,7 +352,6 @@ class TurnstileSolver:
                     "solve_attempt_failed attempt=%d attempt_ms=%d error=%s",
                     attempt, attempt_ms, last_error,
                 )
-                # Brief backoff before retrying, unless this was the last try.
                 if attempt < self.max_retries:
                     backoff = min(2.0 * attempt, 5.0)
                     time.sleep(backoff)
@@ -292,7 +374,7 @@ class TurnstileSolver:
         ).to_dict()
 
     # ------------------------------------------------------------------ #
-    # Internals
+    # Single-attempt internals
     # ------------------------------------------------------------------ #
     def _solve_once(
         self,
@@ -300,123 +382,193 @@ class TurnstileSolver:
         sitekey: str,
         proxy: Optional[str],
         widget_type: str,
-        action: str,
+        action: Optional[str],
+        cdata: Optional[str],
+        theme: str,
+        size: str,
+        language: str,
+        appearance: Optional[str],
+        execution: Optional[str],
     ) -> tuple[str, str]:
-        html_path = self._write_html(sitekey, widget_type, action)
-        co = self._build_options(proxy=proxy, referrer=url)
+        config = self._build_config(
+            sitekey=sitekey,
+            widget_type=widget_type,
+            action=action,
+            cdata=cdata,
+            theme=theme,
+            size=size,
+            language=language,
+            appearance=appearance,
+            execution=execution,
+        )
+        html = HTML_TEMPLATE.replace("__CONFIG_JSON__", json.dumps(config))
 
-        tab = None
-        browser = None
-        try:
-            browser = Chromium(co)
-            tab = browser.latest_tab
-            if tab is None:
-                # DrissionPage <4.1 returns a ChromiumPage directly
-                tab = browser
-            tab.set.timeouts(base=self.timeout, page_load=self.timeout, script=self.timeout)
-            tab.get(f"file://{html_path}")
+        with sync_playwright() as p:
+            browser = self._launch_browser(p, proxy)
+            try:
+                page = browser.new_page()
+                # Route interception: serve our HTML when the browser navigates
+                # to the target URL.  Cloudflare sees the correct origin.
+                url_with_slash = url if url.endswith("/") else url + "/"
+                page.route(url_with_slash, lambda route: route.fulfill(
+                    body=html,
+                    status=200,
+                    content_type="text/html; charset=utf-8",
+                ))
+                page.goto(url_with_slash, timeout=self.timeout * 1000)
 
-            token = self._wait_for_token(tab, timeout=self.timeout)
-            ua = self._extract_useragent(tab)
-            if not token:
-                raise RuntimeError("token_empty_after_wait")
-            return token, ua
-        finally:
-            # Attach useragent to any exception for telemetry.
-            try:
-                if tab is not None:
-                    self._extract_useragent(tab)  # cache for error path
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                if browser is not None:
-                    browser.quit()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                html_path.unlink(missing_ok=True)
-            except Exception:  # noqa: BLE001
-                pass
+                token = self._wait_for_token(page, timeout=self.timeout,
+                                             widget_type=widget_type)
+                ua = self._extract_useragent(page)
+                if not token:
+                    raise RuntimeError("token_empty_after_wait")
+                return token, ua
+            finally:
+                try:
+                    browser.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
-    def _build_options(self, proxy: Optional[str], referrer: str) -> ChromiumOptions:
-        co = ChromiumOptions()
-        if self.browser_path:
-            co.set_browser_path(self.browser_path)
-        if self.headless:
-            co.headless()
-        # Stability flags - required inside Docker / systemd containers.
-        for flag in (
+    def _build_config(
+        self,
+        sitekey: str,
+        widget_type: str,
+        action: Optional[str],
+        cdata: Optional[str],
+        theme: str,
+        size: str,
+        language: str,
+        appearance: Optional[str],
+        execution: Optional[str],
+    ) -> dict:
+        """Build the JSON config object passed to ``turnstile.render()``."""
+        # Start from the widget-type defaults, then apply explicit overrides.
+        defaults = WIDGET_TYPE_CONFIG.get(widget_type, WIDGET_TYPE_CONFIG["managed"])
+        cfg: Dict[str, Any] = {
+            "sitekey": sitekey,
+            "theme": theme or "auto",
+            "size": size or "normal",
+            "appearance": appearance or defaults["appearance"],
+            "execution": execution or defaults["execution"],
+        }
+        if action:
+            cfg["action"] = action
+        if cdata:
+            cfg["cdata"] = cdata
+        if language and language != "auto":
+            cfg["language"] = language
+        # Sensible retry defaults so the widget retries on its own.
+        cfg.setdefault("retry", "auto")
+        cfg.setdefault("retry-interval", 2000)
+        cfg.setdefault("refresh-expired", "auto")
+        return cfg
+
+    def _launch_browser(self, playwright, proxy: Optional[str]) -> Browser:
+        launch_args = [
             "--no-sandbox",
             "--disable-dev-shm-usage",
-            "--disable-gpu",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=IsolateOrigins,site-per-process",
             "--disable-background-networking",
+            "--disable-default-apps",
             "--disable-extensions",
             "--disable-sync",
             "--disable-translate",
-            "--disable-default-apps",
             "--no-first-run",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=IsolateOrigins,site-per-process",
             "--window-size=1280,800",
-        ):
-            co.set_argument(flag)
+        ]
         if self.useragent:
-            co.set_user_agent(self.useragent)
+            launch_args.append(f"--user-agent={self.useragent}")
+
+        launch_opts: Dict[str, Any] = {
+            "headless": self.headless,
+            "args": launch_args,
+        }
+        if self.browser_path:
+            launch_opts["executable_path"] = self.browser_path
+        elif self.browser_type == "chrome":
+            launch_opts["channel"] = "chrome"
+        elif self.browser_type == "msedge":
+            launch_opts["channel"] = "msedge"
+        # browser_type == "chromium" → use patchright's patched build (default)
+
         if proxy:
-            co.set_proxy(proxy)
-        if referrer:
-            # Spoof the referer so Cloudflare sees the registered domain.
-            co.set_argument(f"--referer={referrer}")
-        # Mute noisy stderr from Chromium when headless.
-        co.set_argument("--log-level=3")
-        return co
+            launch_opts["proxy"] = self._parse_proxy(proxy)
 
-    def _write_html(self, sitekey: str, widget_type: str, action: str) -> Path:
-        # Use str.replace() instead of str.format() so the JavaScript object
-        # braces in the template are not mistaken for format placeholders.
-        html = (
-            HTML_TEMPLATE
-            .replace("__SITEKEY__", sitekey)
-            .replace("__WIDGET_TYPE__", widget_type)
-            .replace("__ACTION__", action or "")
-        )
-        fd, path = tempfile.mkstemp(
-            prefix="turnstile_", suffix=".html", dir=str(self.tmp_dir)
-        )
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(html)
-        return Path(path)
+        return playwright.chromium.launch(**launch_opts)
 
-    def _wait_for_token(self, tab, timeout: int) -> Optional[str]:
+    @staticmethod
+    def _parse_proxy(proxy_url: str) -> dict:
+        """Convert a proxy URL string into patchright's proxy dict."""
+        parsed = urlparse(proxy_url)
+        if not parsed.hostname or not parsed.port:
+            raise ValueError(f"invalid proxy url: {proxy_url!r}")
+        server = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+        result: Dict[str, str] = {"server": server}
+        if parsed.username:
+            result["username"] = unquote(parsed.username)
+        if parsed.password:
+            result["password"] = unquote(parsed.password)
+        return result
+
+    def _wait_for_token(self, page: Page, timeout: int,
+                        widget_type: str) -> Optional[str]:
+        """Poll for the token via both the JS callback and the hidden input."""
         deadline = time.monotonic() + timeout
         poll_interval = 0.4
+        last_click = 0.0
+        click_cooldown = 2.0  # don't hammer the widget
+
         while time.monotonic() < deadline:
+            # Method 1: callback-populated JS variable (most reliable).
             try:
-                token = tab.run_js("return window.__tsToken || null;")
+                token = page.evaluate("() => window.__tsToken")
                 if token and isinstance(token, str) and len(token) > 20:
                     return token
-                err = tab.run_js("return window.__tsError || null;")
+            except Exception:  # noqa: BLE001
+                pass
+
+            # Method 2: hidden input that Turnstile populates (fallback).
+            try:
+                val = page.input_value("[name=cf-turnstile-response]", timeout=500)
+                if val and len(val) > 20:
+                    return val
+            except Exception:  # noqa: BLE001
+                pass
+
+            # Check for hard errors from Cloudflare.
+            try:
+                err = page.evaluate("() => window.__tsError")
                 if err:
-                    # If it is a hard error from Cloudflare, bail immediately.
                     raise RuntimeError(f"turnstile_error: {err}")
             except RuntimeError:
                 raise
-            except Exception:  # noqa: BLE001 - keep polling through JS hiccups
-                logger.debug("poll_js_exception", exc_info=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+            # For visible widgets (managed / non-interactive) a click can
+            # nudge the challenge forward.  Skip for invisible widgets -
+            # there is nothing to click and execute() already ran in JS.
+            if widget_type != "invisible" and (time.monotonic() - last_click) > click_cooldown:
+                try:
+                    page.click("div.cf-turnstile, #cf-turnstile", timeout=1500)
+                    last_click = time.monotonic()
+                except Exception:  # noqa: BLE001
+                    pass
+
             time.sleep(poll_interval)
+
         return None
 
-    def _extract_useragent(self, tab) -> str:
+    @staticmethod
+    def _extract_useragent(page: Page) -> str:
         try:
-            ua = tab.run_js("return navigator.userAgent;")
+            ua = page.evaluate("() => navigator.userAgent")
             if ua and isinstance(ua, str):
                 return ua
         except Exception:  # noqa: BLE001
             pass
-        try:
-            return tab.user_agent  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001
-            return self.useragent or DEFAULT_UA
+        return DEFAULT_UA
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -437,7 +589,7 @@ _default_solver: Optional[TurnstileSolver] = None
 
 
 def get_solver() -> TurnstileSolver:
-    """Return a lazily constructed process-wide :class:`TurnstileSolver`."""
+    """Return a lazily-constructed process-wide :class:`TurnstileSolver`."""
     global _default_solver
     if _default_solver is None:
         _default_solver = TurnstileSolver()

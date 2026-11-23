@@ -8,4 +8,4 @@ from solver.core import TurnstileSolver
 from solver.proxy import ProxyManager
 
 __all__ = ["TurnstileSolver", "ProxyManager"]
-__version__ = "1.0.0"
+__version__ = "2.0.0"
