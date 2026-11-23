@@ -42,3 +42,6 @@ db/
 skills/
 node_modules/
 agent-ctx/
+
+# Deployment scripts (contain hardcoded hostnames, not part of solver)
+scripts/
