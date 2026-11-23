@@ -31,6 +31,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
+from solver import __version__ as SOLVER_VERSION
 from solver.core import TurnstileSolver, get_solver
 from solver.proxy import ProxyManager
 
@@ -285,7 +286,7 @@ class StatsResponse(BaseModel):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Lucid Turnstile Solver",
-        version="2.0.0",
+        version=SOLVER_VERSION,
         description="Cloudflare Turnstile token solver API (patchright-based, all widget types).",
         docs_url="/docs",
         redoc_url=None,
@@ -388,7 +389,7 @@ def create_app() -> FastAPI:
     async def root() -> Dict[str, str]:
         return {
             "service": "lucid-turnstile-solver",
-            "version": "2.0.0",
+            "version": SOLVER_VERSION,
             "docs": "/docs",
             "health": "/health",
         }

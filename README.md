@@ -53,11 +53,17 @@ better than the defaults.
 ```
 .
 ├── solver/
-│   ├── __init__.py        # Package exports
-│   ├── core.py            # TurnstileSolver (patchright, route interception)
+│   ├── __init__.py        # Package exports + version
+│   ├── constants.py       # DEFAULT_UA, WIDGET_TYPE_CONFIG, HTML_TEMPLATE
+│   ├── models.py          # SolveResult dataclass
+│   ├── utils.py           # env_bool helper
+│   ├── browser.py         # BrowserLauncher (patchright launch + proxy parse)
+│   ├── html_builder.py    # build_config() + render_html()
+│   ├── token_poller.py    # wait_for_token() + extract_useragent()
+│   ├── core.py            # TurnstileSolver orchestrator + get_solver()
 │   ├── proxy.py           # ProxyManager (round-robin pool)
 │   └── api.py             # FastAPI app + metrics + JSON logging
-├── Dockerfile             # python:3.11-slim + patchright chromium
+├── Dockerfile             # python:3.11-slim + system Google Chrome
 ├── requirements.txt       # All deps pinned
 ├── .env.example           # Every env var documented
 ├── start.sh               # pip install + uvicorn launch
