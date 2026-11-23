@@ -47,9 +47,13 @@ logger = logging.getLogger("solver.core")
 # any residual fingerprint.
 # ---------------------------------------------------------------------------
 
+# Default user-agent.  MUST NOT contain "HeadlessChrome" — that substring
+# is an instant bot-detection signal for Cloudflare.  We default to a
+# realistic Chrome UA; the version doesn't need to match the binary exactly.
+# Override via the USER_AGENT env var for a specific Chrome version.
 DEFAULT_UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36"
 )
 
 # ---------------------------------------------------------------------------
@@ -218,14 +222,19 @@ class TurnstileSolver:
         max_retries: int = 3,
         timeout: int = 30,
         useragent: Optional[str] = None,
-        browser_type: str = "chromium",
+        browser_type: str = "chrome",
         browser_path: Optional[str] = None,
     ) -> None:
         self.headless = self._env_bool("HEADLESS", headless)
         self.max_retries = int(os.getenv("MAX_RETRIES", max_retries))
         self.timeout = int(os.getenv("SOLVE_TIMEOUT", timeout))
         self.useragent = useragent or os.getenv("USER_AGENT") or DEFAULT_UA
-        self.browser_type = os.getenv("BROWSER_TYPE", browser_type) or "chromium"
+        # Default to "chrome" (system Google Chrome via channel="chrome")
+        # — this gives a real Chrome binary which Cloudflare's bot detection
+        # has a harder time fingerprinting than Playwright's bundled Chromium.
+        # Fall back to "chromium" (patchright's patched build) if system
+        # Chrome is not available.
+        self.browser_type = os.getenv("BROWSER_TYPE", browser_type) or "chrome"
         self.browser_path = browser_path or os.getenv("CHROMIUM_PATH") or os.getenv("BROWSER_PATH")
 
         if self.browser_type not in self.BROWSER_TYPES:
@@ -464,19 +473,12 @@ class TurnstileSolver:
         return cfg
 
     def _launch_browser(self, playwright, proxy: Optional[str]) -> Browser:
-        launch_args = [
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-background-networking",
-            "--disable-default-apps",
-            "--disable-extensions",
-            "--disable-sync",
-            "--disable-translate",
-            "--no-first-run",
-            "--window-size=1280,800",
-        ]
+        # Minimal args — patchright handles anti-detection internally.
+        # Extra flags like --disable-blink-features=AutomationControlled are
+        # counterproductive: they themselves become fingerprints that
+        # Cloudflare detects.  Only --no-sandbox (required for root) and
+        # --user-agent (to strip "HeadlessChrome") are needed.
+        launch_args = ["--no-sandbox"]
         if self.useragent:
             launch_args.append(f"--user-agent={self.useragent}")
 
@@ -487,10 +489,11 @@ class TurnstileSolver:
         if self.browser_path:
             launch_opts["executable_path"] = self.browser_path
         elif self.browser_type == "chrome":
+            # System Google Chrome — real binary, best stealth.
             launch_opts["channel"] = "chrome"
         elif self.browser_type == "msedge":
             launch_opts["channel"] = "msedge"
-        # browser_type == "chromium" → use patchright's patched build (default)
+        # browser_type == "chromium" → patchright's patched build (fallback)
 
         if proxy:
             launch_opts["proxy"] = self._parse_proxy(proxy)

@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1.6
 
 # ---------------------------------------------------------------------------
-# Lucid Turnstile Solver - production image (v2, patchright-based)
+# Lucid Turnstile Solver - production image (v2, patchright + system Chrome)
 # Base: python:3.11-slim (Debian Bookworm)
 #
-# patchright ships its own patched Chromium binary (downloaded via
-# `patchright install chromium`) which has automation fingerprints stripped.
-# We do NOT use the system chromium package - patchright's build is what
-# defeats Cloudflare's bot detection.
+# We install Google Chrome (real .deb, not snap) and use it via
+# channel="chrome" in patchright.  System Chrome has a real binary
+# fingerprint that Cloudflare's bot detection has a harder time
+# identifying than Playwright's bundled Chromium.
 # ---------------------------------------------------------------------------
 
 FROM python:3.11-slim AS base
@@ -24,55 +24,34 @@ ENV PYTHONUNBUFFERED=1 \
     HOST=0.0.0.0 \
     PORT=8000 \
     WORKERS=4 \
-    BROWSER_TYPE=chromium
+    BROWSER_TYPE=chrome
 
-# System deps: libs that patchright's Chromium needs at runtime, fonts,
-# ca-certificates, curl for the healthcheck, tini as PID 1.
+# System deps + Google Chrome (real .deb from Google's repo).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libnss3 \
-        libnspr4 \
-        libatk1.0-0 \
-        libatk-bridge2.0-0 \
-        libcups2 \
-        libdrm2 \
-        libdbus-1-3 \
-        libxkbcommon0 \
-        libxcomposite1 \
-        libxdamage1 \
-        libxfixes3 \
-        libxrandr2 \
-        libgbm1 \
-        libpango-1.0-0 \
-        libcairo2 \
-        libasound2 \
-        libatspi2.0-0 \
-        libxshmfence1 \
-        fonts-liberation \
-        fonts-noto-color-emoji \
-        ca-certificates \
-        curl \
-        tini \
-        && rm -rf /var/lib/apt/lists/* \
-        && update-ca-certificates
+        wget gnupg ca-certificates curl tini \
+        fonts-liberation fonts-noto-color-emoji \
+        libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+        libdrm2 libdbus-1-3 libxkbcommon0 libxcomposite1 libxdamage1 \
+        libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
+        libasound2 libatspi2.0-0 libxshmfence1 \
+    && wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb \
+    && dpkg -i /tmp/chrome.deb || apt-get install -f -y --no-install-recommends \
+    && rm -f /tmp/chrome.deb \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-ca-certificates
 
 WORKDIR /app
 
-# Install Python deps first for better layer caching.
+# Install Python deps.
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
-
-# Install patchright's patched Chromium browser (~170 MB).  This is the
-# whole point of patchright - a Chromium build with automation fingerprints
-# stripped so Cloudflare can't easily detect it.
-RUN patchright install chromium
 
 # Application code.
 COPY solver /app/solver
 COPY start.sh /app/start.sh
 COPY .env.example /app/.env.example
 
-# Non-root user.  Chromium needs --no-sandbox under non-root; the solver
-# already passes --no-sandbox in solver/core.py.
+# Non-root user.
 RUN groupadd --system --gid 1001 lucid \
     && useradd --system --uid 1001 --gid lucid --home-dir /home/lucid \
        --create-home --shell /usr/sbin/nologin lucid \
