@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------------------
+# Lucid Turnstile Solver - systemd unit for Ubuntu / Debian VPS
+# Install:
+#   sudo cp lucid-solver.service /etc/systemd/system/
+#   sudo cp -r solver /opt/lucid-solver/
+#   sudo cp requirements.txt start.sh .env /opt/lucid-solver/
+#   sudo useradd --system --home /opt/lucid-solver lucid
+#   sudo chown -R lucid:lucid /opt/lucid-solver
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now lucid-solver
+#   journalctl -u lucid-solver -f
+# ---------------------------------------------------------------------------
+
+[Unit]
+Description=Lucid Turnstile Solver API
+Documentation=https://github.com/Theyka/Turnstile-Solver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lucid
+Group=lucid
+WorkingDirectory=/opt/lucid-solver
+EnvironmentFile=/opt/lucid-solver/.env
+
+# Chromium needs --no-sandbox under a non-root user which the solver
+# already sets; we still relax the sandbox slightly for /tmp write access.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/lucid-solver /tmp
+
+ExecStart=/opt/lucid-solver/start.sh
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+KillSignal=SIGINT
+SuccessExitStatus=130
+
+# Allow enough file descriptors for multiple Chromium workers.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
