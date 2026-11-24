@@ -28,12 +28,13 @@ from collections import deque
 from typing import Any, Deque, Dict, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from solver import __version__ as SOLVER_VERSION
 from solver.core import TurnstileSolver, get_solver
 from solver.proxy import ProxyManager
+from solver.web import HOMEPAGE_HTML
 
 # ---------------------------------------------------------------------------
 # JSON logging to stdout
@@ -385,14 +386,9 @@ def create_app() -> FastAPI:
             )
         return SolveResponse(**result)
 
-    @app.get("/", tags=["meta"])
-    async def root() -> Dict[str, str]:
-        return {
-            "service": "lucid-turnstile-solver",
-            "version": SOLVER_VERSION,
-            "docs": "/docs",
-            "health": "/health",
-        }
+    @app.get("/", tags=["meta"], response_class=HTMLResponse)
+    async def root() -> HTMLResponse:
+        return HTMLResponse(content=HOMEPAGE_HTML)
 
     return app
 
