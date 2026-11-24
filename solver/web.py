@@ -1,22 +1,6 @@
 """Self-contained HTML homepage for the Lucid Turnstile Solver.
 
 Served by ``solver/api.py`` at ``GET /`` as an ``HTMLResponse``.
-
-Design: dark hacker terminal aesthetic — black background, neon green/cyan
-accents, monospace typography.  The page is fully self-contained (inline CSS
-and JS, no external assets) so it works offline and adds zero latency.
-
-Features
---------
-* **Live stats bar** — polls ``/stats`` every 5s, shows success rate, avg
-  solve time, total solves, error breakdown.
-* **Interactive tester** — enter URL + sitekey + widget type, click SOLVE,
-  get the token right in the browser.  Supports all config options
-  (action, cdata, theme, size, language, appearance, execution).
-* **Result panel** — shows the token with a copy-to-clipboard button,
-  elapsed time, attempts, user-agent, status badge.
-* **API docs** — curl examples for every endpoint with copy buttons, widget
-  type reference table.
 """
 
 from __future__ import annotations
@@ -26,491 +10,520 @@ HOMEPAGE_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Lucid Turnstile Solver</title>
+<title>Lucid — Turnstile Solver</title>
 <style>
   :root {
-    --bg: #0a0a0a;
-    --bg-card: #111;
-    --border: #1a1a1a;
-    --green: #00ff41;
-    --cyan: #00d4ff;
-    --red: #ff0040;
-    --yellow: #ffb000;
-    --dim: #444;
-    --text: #c0c0c0;
-    --text-bright: #e0e0e0;
+    --bg: #08090a;
+    --bg-grad: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(16,185,129,0.08), transparent);
+    --card: rgba(255,255,255,0.025);
+    --card-hover: rgba(255,255,255,0.04);
+    --border: rgba(255,255,255,0.06);
+    --border-active: rgba(16,185,129,0.3);
+    --green: #10b981;
+    --green-glow: rgba(16,185,129,0.15);
+    --cyan: #06b6d4;
+    --red: #ef4444;
+    --yellow: #f59e0b;
+    --text: #e4e4e7;
+    --text-dim: #71717a;
+    --text-faint: #52525b;
+    --radius: 14px;
+    --radius-sm: 8px;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     background: var(--bg);
+    background-image: var(--bg-grad);
+    background-attachment: fixed;
     color: var(--text);
-    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-    font-size: 14px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-size: 15px;
     line-height: 1.6;
     min-height: 100vh;
-    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
   }
-  /* Scan line effect */
-  body::before {
-    content: '';
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: linear-gradient(transparent 50%, rgba(0,255,65,0.015) 50%);
-    background-size: 100% 4px;
-    pointer-events: none;
-    z-index: 9999;
-  }
-  .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 0 20px; }
 
-  /* Header */
-  header {
+  /* Nav */
+  nav {
+    padding: 24px 0;
+    display: flex; align-items: center; justify-content: space-between;
     border-bottom: 1px solid var(--border);
-    padding: 20px 0;
-    margin-bottom: 30px;
   }
-  .header-flex { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
-  h1 {
-    color: var(--green);
-    font-size: 22px;
-    font-weight: 700;
-    letter-spacing: 2px;
-    text-shadow: 0 0 10px rgba(0,255,65,0.3);
+  .logo { display: flex; align-items: center; gap: 10px; }
+  .logo-mark {
+    width: 28px; height: 28px; border-radius: 7px;
+    background: linear-gradient(135deg, var(--green), var(--cyan));
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; color: #000; font-size: 15px;
   }
-  .version { color: var(--dim); font-size: 12px; }
+  .logo-text { font-weight: 700; font-size: 16px; letter-spacing: -0.3px; }
+  .logo-text span { color: var(--text-dim); font-weight: 400; }
+  .nav-right { display: flex; align-items: center; gap: 20px; font-size: 13px; }
+  .nav-right a { color: var(--text-dim); text-decoration: none; transition: color 0.2s; }
+  .nav-right a:hover { color: var(--text); }
+  .status {
+    display: flex; align-items: center; gap: 6px;
+    color: var(--text-dim); font-size: 12px;
+  }
   .status-dot {
-    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-    background: var(--dim); margin-right: 6px; transition: all 0.3s;
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--text-faint); transition: all 0.3s;
   }
-  .status-dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
-  .status-dot.down { background: var(--red); box-shadow: 0 0 8px var(--red); }
-  .status-badge { font-size: 12px; color: var(--dim); }
+  .status-dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green-glow); }
 
-  /* Stats bar */
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 12px;
-    margin-bottom: 30px;
+  /* Hero */
+  .hero { padding: 60px 0 40px; text-align: center; }
+  .hero h1 {
+    font-size: 38px; font-weight: 800; letter-spacing: -1px;
+    line-height: 1.1; margin-bottom: 12px;
   }
-  .stat-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-left: 2px solid var(--cyan);
-    padding: 14px;
+  .hero h1 .grad {
+    background: linear-gradient(135deg, var(--green), var(--cyan));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
   }
-  .stat-label { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
-  .stat-value { color: var(--text-bright); font-size: 22px; font-weight: 700; margin-top: 4px; }
-  .stat-value.green { color: var(--green); }
-  .stat-value.yellow { color: var(--yellow); }
-  .stat-value.red { color: var(--red); }
+  .hero p { color: var(--text-dim); font-size: 16px; max-width: 480px; margin: 0 auto; }
+  .hero-badges { display: flex; gap: 8px; justify-content: center; margin-top: 20px; flex-wrap: wrap; }
+  .badge {
+    font-size: 11px; padding: 4px 10px; border-radius: 20px;
+    background: var(--card); border: 1px solid var(--border);
+    color: var(--text-dim); font-weight: 500;
+  }
+  .badge.green { color: var(--green); border-color: rgba(16,185,129,0.2); background: rgba(16,185,129,0.05); }
 
-  /* Panels */
-  .panel {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    margin-bottom: 20px;
+  /* Stats */
+  .stats {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    margin-bottom: 32px;
   }
-  .panel-header {
-    border-bottom: 1px solid var(--border);
-    padding: 10px 16px;
-    color: var(--cyan);
-    font-size: 13px;
-    letter-spacing: 1px;
+  .stat {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 16px;
+    transition: all 0.2s;
+  }
+  .stat:hover { background: var(--card-hover); border-color: var(--border-active); }
+  .stat-label { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; }
+  .stat-val { font-size: 24px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .stat-val.green { color: var(--green); }
+  .stat-val.red { color: var(--red); }
+
+  /* Card */
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); margin-bottom: 20px; overflow: hidden;
+  }
+  .card-head {
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .card-title {
+    font-size: 13px; font-weight: 600; color: var(--text);
     display: flex; align-items: center; gap: 8px;
   }
-  .panel-header::before { content: '$'; color: var(--green); }
-  .panel-body { padding: 16px; }
+  .card-title svg { width: 16px; height: 16px; opacity: 0.6; }
+  .card-body { padding: 20px; }
 
-  /* Forms */
-  label { display: block; color: var(--dim); font-size: 12px; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-  input, select, textarea {
-    width: 100%;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text-bright);
-    padding: 8px 12px;
-    font-family: inherit;
-    font-size: 13px;
-    outline: none;
-    transition: border-color 0.2s;
+  /* Form */
+  .field { margin-bottom: 14px; }
+  .field label {
+    display: block; font-size: 12px; color: var(--text-dim);
+    margin-bottom: 6px; font-weight: 500;
   }
-  input:focus, select:focus, textarea:focus { border-color: var(--green); }
-  .field { margin-bottom: 12px; }
-  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
-
-  /* Advanced toggle */
-  .advanced-toggle {
-    color: var(--cyan); cursor: pointer; font-size: 12px; user-select: none;
-    margin-bottom: 12px; display: inline-block;
+  .field input, .field select {
+    width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border);
+    color: var(--text); padding: 10px 14px; border-radius: var(--radius-sm);
+    font-family: inherit; font-size: 14px; outline: none; transition: all 0.2s;
   }
-  .advanced-toggle:hover { color: var(--green); }
-  .advanced { display: none; }
-  .advanced.open { display: block; }
+  .field input::placeholder { color: var(--text-faint); }
+  .field input:focus, .field select:focus {
+    border-color: var(--green); box-shadow: 0 0 0 3px var(--green-glow);
+  }
+  .field select { cursor: pointer; }
+  .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
 
-  /* Buttons */
+  /* Advanced */
+  .adv-toggle {
+    color: var(--cyan); font-size: 13px; cursor: pointer; user-select: none;
+    margin-bottom: 14px; display: inline-flex; align-items: center; gap: 4px;
+    transition: color 0.2s;
+  }
+  .adv-toggle:hover { color: var(--text); }
+  .adv-toggle .arrow { transition: transform 0.2s; display: inline-block; }
+  .adv-toggle.open .arrow { transform: rotate(90deg); }
+  .adv { display: none; }
+  .adv.open { display: block; animation: fadeIn 0.2s; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* Button */
   .btn {
-    background: transparent;
-    border: 1px solid var(--green);
-    color: var(--green);
-    padding: 10px 24px;
-    font-family: inherit;
-    font-size: 14px;
-    font-weight: 700;
-    letter-spacing: 2px;
-    cursor: pointer;
-    transition: all 0.2s;
-    text-transform: uppercase;
+    background: var(--green); color: #000; border: none;
+    padding: 12px 32px; border-radius: var(--radius-sm);
+    font-family: inherit; font-size: 14px; font-weight: 700;
+    cursor: pointer; transition: all 0.2s; letter-spacing: 0.5px;
+    width: 100%; margin-top: 4px;
   }
-  .btn:hover { background: var(--green); color: var(--bg); box-shadow: 0 0 15px rgba(0,255,65,0.4); }
-  .btn:disabled { border-color: var(--dim); color: var(--dim); cursor: not-allowed; }
-  .btn:disabled:hover { background: transparent; color: var(--dim); box-shadow: none; }
-  .btn-sm { padding: 4px 10px; font-size: 11px; border-color: var(--cyan); color: var(--cyan); }
-  .btn-sm:hover { background: var(--cyan); color: var(--bg); }
+  .btn:hover { box-shadow: 0 0 20px var(--green-glow); transform: translateY(-1px); }
+  .btn:active { transform: translateY(0); }
+  .btn:disabled { background: var(--text-faint); cursor: not-allowed; box-shadow: none; transform: none; }
+  .btn-sm {
+    background: transparent; border: 1px solid var(--border); color: var(--text-dim);
+    padding: 4px 12px; font-size: 12px; font-weight: 500; border-radius: 6px;
+    width: auto; margin: 0;
+  }
+  .btn-sm:hover { border-color: var(--green); color: var(--green); background: var(--green-glow); }
 
   /* Result */
-  .result-box {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    padding: 12px;
-    margin-top: 12px;
-    position: relative;
+  .result { margin-top: 16px; border-radius: var(--radius-sm); overflow: hidden; }
+  .result.success { border: 1px solid rgba(16,185,129,0.2); background: rgba(16,185,129,0.03); }
+  .result.failed { border: 1px solid rgba(239,68,68,0.2); background: rgba(239,68,68,0.03); }
+  .result-head { padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
+  .result-status { font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .result-status.ok { color: var(--green); }
+  .result-status.err { color: var(--red); }
+  .result-body { padding: 14px; }
+  .token-box {
+    font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', Consolas, monospace;
+    font-size: 12px; color: var(--green); word-break: break-all;
+    max-height: 120px; overflow-y: auto; padding-right: 50px; line-height: 1.5;
   }
-  .result-box.success { border-left: 3px solid var(--green); }
-  .result-box.failed { border-left: 3px solid var(--red); }
-  .result-token {
-    word-break: break-all;
-    color: var(--green);
-    font-size: 12px;
-    max-height: 150px;
-    overflow-y: auto;
-    padding-right: 40px;
+  .meta { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 12px; font-size: 12px; color: var(--text-dim); }
+  .meta-item b { color: var(--text); font-weight: 600; }
+  .copy {
+    background: transparent; border: 1px solid var(--border); color: var(--text-dim);
+    padding: 3px 10px; font-size: 11px; border-radius: 5px; cursor: pointer;
+    font-family: inherit; transition: all 0.2s;
   }
-  .result-meta { color: var(--dim); font-size: 11px; margin-top: 8px; }
-  .result-meta span { color: var(--text); margin-right: 16px; }
-  .copy-btn {
-    position: absolute; top: 8px; right: 8px;
-    background: transparent; border: 1px solid var(--cyan); color: var(--cyan);
-    padding: 2px 8px; font-size: 11px; cursor: pointer; font-family: inherit;
-  }
-  .copy-btn:hover { background: var(--cyan); color: var(--bg); }
-  .copy-btn.copied { border-color: var(--green); color: var(--green); }
+  .copy:hover { border-color: var(--green); color: var(--green); }
+  .copy.done { border-color: var(--green); color: var(--green); background: var(--green-glow); }
 
-  /* Docs */
-  .code-block {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    padding: 12px;
-    position: relative;
-    overflow-x: auto;
-    margin-bottom: 12px;
+  /* Code block */
+  .code {
+    background: rgba(0,0,0,0.3); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 14px 16px; position: relative;
+    margin-bottom: 12px; overflow-x: auto;
   }
-  .code-block pre { color: var(--text-bright); font-size: 12px; white-space: pre; }
-  .code-block .copy-btn { position: absolute; top: 6px; right: 6px; }
+  .code pre {
+    font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+    font-size: 12.5px; color: var(--text); white-space: pre; line-height: 1.6;
+  }
+  .code .copy { position: absolute; top: 8px; right: 8px; }
 
   /* Table */
-  table { width: 100%; border-collapse: collapse; }
-  th { color: var(--cyan); text-align: left; padding: 8px; border-bottom: 1px solid var(--border); font-size: 12px; }
-  td { padding: 8px; border-bottom: 1px solid var(--border); font-size: 12px; }
-  td code { color: var(--green); }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th { text-align: left; padding: 10px 12px; font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; border-bottom: 1px solid var(--border); }
+  td { padding: 10px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
+  td:first-child { color: var(--green); font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
 
-  /* Spinner */
-  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--dim); border-top-color: var(--green); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  /* Loading */
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.1); border-top-color: var(--green); border-radius: 50%; animation: spin 0.7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .loading { padding: 20px; text-align: center; color: var(--text-dim); font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 8px; }
 
   /* Toast */
   .toast {
-    position: fixed; bottom: 20px; right: 20px;
-    background: var(--bg-card); border: 1px solid var(--green); color: var(--green);
-    padding: 10px 16px; font-size: 12px; z-index: 10000;
-    opacity: 0; transform: translateY(20px); transition: all 0.3s;
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px);
+    background: var(--card); backdrop-filter: blur(12px); border: 1px solid var(--border);
+    color: var(--text); padding: 10px 20px; border-radius: 10px; font-size: 13px;
+    z-index: 1000; opacity: 0; transition: all 0.3s; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
   }
-  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
   /* Footer */
-  footer { border-top: 1px solid var(--border); margin-top: 40px; padding: 20px 0; text-align: center; color: var(--dim); font-size: 11px; }
+  footer { padding: 32px 0; text-align: center; color: var(--text-faint); font-size: 12px; }
+  footer a { color: var(--text-dim); text-decoration: none; transition: color 0.2s; }
+  footer a:hover { color: var(--green); }
 
   /* Scrollbar */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: var(--bg); }
-  ::-webkit-scrollbar-thumb { background: var(--border); }
-  ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
 
-  @media (max-width: 600px) {
-    .grid-2, .grid-3 { grid-template-columns: 1fr; }
-    h1 { font-size: 18px; }
+  @media (max-width: 640px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .row-2, .row-3 { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 28px; }
+    .hero { padding: 40px 0 30px; }
   }
 </style>
 </head>
 <body>
-<div class="container">
+<div class="wrap">
 
-  <!-- Header -->
-  <header>
-    <div class="header-flex">
-      <div>
-        <h1>&gt; LUCID_TURNSTILE_SOLVER</h1>
-        <span class="version">v<span id="version">2.1.0</span> // patchright + system chrome</span>
-      </div>
-      <div class="status-badge">
-        <span class="status-dot" id="statusDot"></span>
-        <span id="statusText">connecting...</span>
+  <nav>
+    <div class="logo">
+      <div class="logo-mark">L</div>
+      <div class="logo-text">Lucid<span> // Turnstile Solver</span></div>
+    </div>
+    <div class="nav-right">
+      <a href="https://github.com/LegendXD221/Lucid-Solver" target="_blank">GitHub</a>
+      <a href="/docs" target="_blank">API</a>
+      <div class="status">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText">—</span>
       </div>
     </div>
-  </header>
+  </nav>
+
+  <!-- Hero -->
+  <div class="hero">
+    <h1>Solve <span class="grad">Cloudflare Turnstile</span><br>in seconds.</h1>
+    <p>Headless Chromium with anti-detection patches. Supports managed, non-interactive, and invisible widget types. Real tokens, every time.</p>
+    <div class="hero-badges">
+      <span class="badge green">patchright engine</span>
+      <span class="badge">3 widget types</span>
+      <span class="badge">~14s avg</span>
+      <span class="badge">system chrome</span>
+    </div>
+  </div>
 
   <!-- Stats -->
-  <div class="stats-grid" id="statsGrid">
-    <div class="stat-card"><div class="stat-label">Solves</div><div class="stat-value" id="statTotal">--</div></div>
-    <div class="stat-card"><div class="stat-label">Success Rate</div><div class="stat-value green" id="statRate">--</div></div>
-    <div class="stat-card"><div class="stat-label">Avg Time</div><div class="stat-value" id="statAvg">--</div></div>
-    <div class="stat-card"><div class="stat-label">Errors</div><div class="stat-value red" id="statErrors">--</div></div>
+  <div class="stats" id="stats">
+    <div class="stat"><div class="stat-label">Total Solves</div><div class="stat-val" id="sTotal">—</div></div>
+    <div class="stat"><div class="stat-label">Success Rate</div><div class="stat-val green" id="sRate">—</div></div>
+    <div class="stat"><div class="stat-label">Avg Time</div><div class="stat-val" id="sAvg">—</div></div>
+    <div class="stat"><div class="stat-label">Failures</div><div class="stat-val red" id="sFail">—</div></div>
   </div>
 
   <!-- Tester -->
-  <div class="panel">
-    <div class="panel-header">solve --interactive</div>
-    <div class="panel-body">
+  <div class="card">
+    <div class="card-head">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        Live Solver
+      </div>
+    </div>
+    <div class="card-body">
       <div class="field">
         <label>Target URL</label>
-        <input type="text" id="url" placeholder="https://www.crunchbase.com/login" value="https://www.crunchbase.com/login">
+        <input type="text" id="url" placeholder="https://example.com/login" value="https://www.crunchbase.com/login">
       </div>
       <div class="field">
         <label>Sitekey</label>
         <input type="text" id="sitekey" placeholder="0x4AAAAAAA..." value="0x4AAAAAAAyJK2FfyvayqHnv">
       </div>
-      <div class="grid-2">
+      <div class="row-2">
         <div class="field">
           <label>Widget Type</label>
           <select id="widgetType">
-            <option value="managed">managed</option>
-            <option value="non-interactive">non-interactive</option>
-            <option value="invisible">invisible</option>
+            <option value="managed">Managed</option>
+            <option value="non-interactive">Non-Interactive</option>
+            <option value="invisible">Invisible</option>
           </select>
         </div>
         <div class="field">
-          <label>Proxy (optional)</label>
+          <label>Proxy <span style="color:var(--text-faint)">(optional)</span></label>
           <input type="text" id="proxy" placeholder="http://user:pass@host:port">
         </div>
       </div>
 
-      <div class="advanced-toggle" id="advToggle">[+] advanced options</div>
-      <div class="advanced" id="advanced">
-        <div class="grid-3">
+      <div class="adv-toggle" id="advToggle">
+        <span class="arrow">▸</span> Advanced options
+      </div>
+      <div class="adv" id="adv">
+        <div class="row-3">
           <div class="field"><label>Action</label><input type="text" id="action" placeholder="login"></div>
-          <div class="field"><label>CData</label><input type="text" id="cdata" placeholder="session-123"></div>
-          <div class="field"><label>Language</label><input type="text" id="language" placeholder="auto" value="auto"></div>
+          <div class="field"><label>CData</label><input type="text" id="cdata" placeholder="session-id"></div>
+          <div class="field"><label>Language</label><input type="text" id="lang" placeholder="auto" value="auto"></div>
         </div>
-        <div class="grid-3">
+        <div class="row-3">
           <div class="field"><label>Theme</label><select id="theme"><option>auto</option><option>light</option><option>dark</option></select></div>
           <div class="field"><label>Size</label><select id="size"><option>normal</option><option>flexible</option><option>compact</option></select></div>
           <div class="field"><label>Appearance</label><select id="appearance"><option value="">auto</option><option>always</option><option>execute</option><option>interaction-only</option></select></div>
         </div>
       </div>
 
-      <button class="btn" id="solveBtn" onclick="doSolve()">SOLVE</button>
-      <div id="solveResult"></div>
+      <button class="btn" id="solveBtn" onclick="doSolve()">Solve Challenge</button>
+      <div id="result"></div>
     </div>
   </div>
 
-  <!-- API Docs -->
-  <div class="panel">
-    <div class="panel-header">docs --endpoints</div>
-    <div class="panel-body">
-      <h3 style="color:var(--text-bright);font-size:13px;margin-bottom:12px;">POST /solve</h3>
-      <div class="code-block">
-        <button class="copy-btn" onclick="copyCode(this)">copy</button>
-<pre>curl -X POST <span id="baseUrl"></span>/solve \
+  <!-- Docs -->
+  <div class="card">
+    <div class="card-head">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>
+        API Reference
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="field">
+        <label>POST /solve — Solve a Turnstile challenge</label>
+        <div class="code">
+          <button class="copy" onclick="copyCode(this)">copy</button>
+<pre>curl -X POST <span id="b1"></span>/solve \
   -H 'Content-Type: application/json' \
-  -d '{
-    "url": "https://www.crunchbase.com/login",
-    "sitekey": "0x4AAAAAAAyJK2FfyvayqHnv",
-    "widget_type": "managed"
-  }'</pre>
+  -d '{"url":"https://example.com","sitekey":"0x4AAA...","widget_type":"managed"}'</pre>
+        </div>
+      </div>
+      <div class="row-2">
+        <div class="field">
+          <label>GET /health</label>
+          <div class="code"><button class="copy" onclick="copyCode(this)">copy</button><pre>curl <span id="b2"></span>/health</pre></div>
+        </div>
+        <div class="field">
+          <label>GET /stats</label>
+          <div class="code"><button class="copy" onclick="copyCode(this)">copy</button><pre>curl <span id="b3"></span>/stats</pre></div>
+        </div>
       </div>
 
-      <h3 style="color:var(--text-bright);font-size:13px;margin:12px 0;">GET /health</h3>
-      <div class="code-block">
-        <button class="copy-btn" onclick="copyCode(this)">copy</button>
-<pre>curl <span id="baseUrl2"></span>/health</pre>
-      </div>
-
-      <h3 style="color:var(--text-bright);font-size:13px;margin:12px 0;">GET /stats</h3>
-      <div class="code-block">
-        <button class="copy-btn" onclick="copyCode(this)">copy</button>
-<pre>curl <span id="baseUrl3"></span>/stats</pre>
-      </div>
-
-      <h3 style="color:var(--text-bright);font-size:13px;margin:16px 0 8px;">Widget Types</h3>
+      <label style="margin-top:16px;">Widget Types</label>
       <table>
         <tr><th>Type</th><th>Appearance</th><th>Execution</th><th>Behavior</th></tr>
-        <tr><td><code>managed</code></td><td>always</td><td>render</td><td>Cloudflare decides whether to challenge.</td></tr>
-        <tr><td><code>non-interactive</code></td><td>always</td><td>render</td><td>No user interaction; auto-solves on render.</td></tr>
-        <tr><td><code>invisible</code></td><td>execute</td><td>execute</td><td>Hidden widget; calls turnstile.execute().</td></tr>
+        <tr><td>managed</td><td>always</td><td>render</td><td>Cloudflare decides whether to challenge.</td></tr>
+        <tr><td>non-interactive</td><td>always</td><td>render</td><td>No interaction; auto-solves on render.</td></tr>
+        <tr><td>invisible</td><td>execute</td><td>execute</td><td>Hidden; calls turnstile.execute().</td></tr>
       </table>
     </div>
   </div>
 
   <footer>
-    Lucid Turnstile Solver v2.1.0 // patchright + system chrome // <a href="/docs" style="color:var(--cyan);text-decoration:none;">swagger docs</a> // <a href="https://github.com/LegendXD221/Lucid-Solver" style="color:var(--cyan);text-decoration:none;">github</a>
+    Lucid Turnstile Solver v2.1.0 // Built with patchright + system Chrome //
+    <a href="https://github.com/LegendXD221/Lucid-Solver" target="_blank">Source</a> //
+    <a href="/docs" target="_blank">Swagger</a>
   </footer>
 </div>
 
 <div class="toast" id="toast"></div>
 
 <script>
-const API = window.location.origin;
+const API = location.origin;
+document.querySelectorAll('#b1,#b2,#b3').forEach(e => e.textContent = API);
 
-// ---- Base URL in docs ----
-document.querySelectorAll('#baseUrl, #baseUrl2, #baseUrl3').forEach(el => el.textContent = API);
-
-// ---- Toast ----
-function toast(msg) {
+function toast(m) {
   const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 2000);
+  t.textContent = m; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2200);
 }
 
-// ---- Copy code ----
 function copyCode(btn) {
-  const pre = btn.parentElement.querySelector('pre');
-  const text = pre.innerText.replace(/<[^>]+>/g, '');
+  const text = btn.parentElement.querySelector('pre').innerText;
   navigator.clipboard.writeText(text).then(() => {
-    btn.textContent = 'copied';
-    btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
+    btn.textContent = 'copied'; btn.classList.add('done');
+    setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('done'); }, 1400);
   });
 }
 
-// ---- Advanced toggle ----
 document.getElementById('advToggle').addEventListener('click', function() {
-  const adv = document.getElementById('advanced');
-  adv.classList.toggle('open');
-  this.textContent = adv.classList.contains('open') ? '[-] advanced options' : '[+] advanced options';
+  const adv = document.getElementById('adv');
+  const open = adv.classList.toggle('open');
+  this.classList.toggle('open', open);
 });
 
-// ---- Health check ----
 async function checkHealth() {
   const dot = document.getElementById('statusDot');
-  const text = document.getElementById('statusText');
+  const txt = document.getElementById('statusText');
   try {
-    const r = await fetch(API + '/health');
-    const d = await r.json();
+    const d = await (await fetch(API + '/health')).json();
     dot.className = 'status-dot ok';
-    text.textContent = 'online // ' + d.solves_total + ' solves';
-    document.getElementById('version').textContent = d.version || '2.1.0';
-  } catch(e) {
-    dot.className = 'status-dot down';
-    text.textContent = 'offline';
+    txt.textContent = d.solves_total + ' solves';
+  } catch {
+    dot.className = 'status-dot';
+    txt.textContent = 'offline';
   }
 }
 
-// ---- Stats refresh ----
 async function refreshStats() {
   try {
-    const r = await fetch(API + '/stats');
-    const d = await r.json();
-    document.getElementById('statTotal').textContent = d.solves_total;
-    document.getElementById('statRate').textContent = d.success_rate_pct + '%';
-    document.getElementById('statAvg').textContent = d.avg_ms ? Math.round(d.avg_ms / 1000 * 10) / 10 + 's' : '--';
-    document.getElementById('statErrors').textContent = d.solves_failed;
-  } catch(e) {}
+    const d = await (await fetch(API + '/stats')).json();
+    document.getElementById('sTotal').textContent = d.solves_total;
+    document.getElementById('sRate').textContent = d.success_rate_pct + '%';
+    document.getElementById('sAvg').textContent = d.avg_ms ? (d.avg_ms/1000).toFixed(1)+'s' : '—';
+    document.getElementById('sFail').textContent = d.solves_failed || '0';
+  } catch {}
 }
 
-// ---- Solve ----
 async function doSolve() {
   const btn = document.getElementById('solveBtn');
-  const result = document.getElementById('solveResult');
+  const res = document.getElementById('result');
   const url = document.getElementById('url').value.trim();
   const sitekey = document.getElementById('sitekey').value.trim();
-  if (!url || !sitekey) { toast('url and sitekey required'); return; }
+  if (!url || !sitekey) { toast('URL and sitekey are required'); return; }
 
   const body = {
-    url: url,
-    sitekey: sitekey,
+    url, sitekey,
     widget_type: document.getElementById('widgetType').value,
-    proxy: document.getElementById('proxy').value.trim() || undefined,
   };
-  const action = document.getElementById('action').value.trim();
-  const cdata = document.getElementById('cdata').value.trim();
-  const language = document.getElementById('language').value.trim();
-  const theme = document.getElementById('theme').value;
-  const size = document.getElementById('size').value;
-  const appearance = document.getElementById('appearance').value;
-  if (action) body.action = action;
-  if (cdata) body.cdata = cdata;
-  if (language && language !== 'auto') body.language = language;
-  if (theme) body.theme = theme;
-  if (size) body.size = size;
-  if (appearance) body.appearance = appearance;
+  const px = document.getElementById('proxy').value.trim();
+  if (px) body.proxy = px;
+  const act = document.getElementById('action').value.trim();
+  const cd = document.getElementById('cdata').value.trim();
+  const lng = document.getElementById('lang').value.trim();
+  if (act) body.action = act;
+  if (cd) body.cdata = cd;
+  if (lng && lng !== 'auto') body.language = lng;
+  const th = document.getElementById('theme').value;
+  const sz = document.getElementById('size').value;
+  const ap = document.getElementById('appearance').value;
+  if (th) body.theme = th;
+  if (sz) body.size = sz;
+  if (ap) body.appearance = ap;
 
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> SOLVING';
-  result.innerHTML = '<div style="color:var(--dim);padding:12px;"><span class="spinner"></span> launching browser... (up to 90s)</div>';
+  btn.innerHTML = '<span class="spinner"></span> Solving...';
+  res.innerHTML = '<div class="loading"><span class="spinner"></span> Launching browser — this takes ~15s</div>';
 
   try {
-    const start = Date.now();
     const r = await fetch(API + '/solve', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     const d = await r.json();
-    const clientElapsed = Date.now() - start;
 
     if (d.status === 'success') {
-      result.innerHTML = `
-        <div class="result-box success">
-          <button class="copy-btn" onclick="copyToken(this)">copy</button>
-          <div class="result-token" id="tokenText">${d.token || ''}</div>
-          <div class="result-meta">
-            <span>status: <span style="color:var(--green)">${d.status}</span></span>
-            <span>elapsed: ${d.elapsed_ms}ms</span>
-            <span>attempts: ${d.attempts}</span>
-            <span>widget: ${d.widget_type}</span>
+      res.innerHTML = `
+        <div class="result success">
+          <div class="result-head">
+            <div class="result-status ok">✓ Token received</div>
+            <button class="copy" onclick="copyToken(this,'${d.token.replace(/'/g,"\\'")}')">copy token</button>
           </div>
-          <div class="result-meta" style="margin-top:4px;">
-            <span>UA: ${(d.useragent||'').substring(0,60)}...</span>
+          <div class="result-body">
+            <div class="token-box" id="tokenBox">${d.token}</div>
+            <div class="meta">
+              <span class="meta-item">elapsed: <b>${d.elapsed_ms}ms</b></span>
+              <span class="meta-item">attempts: <b>${d.attempts}</b></span>
+              <span class="meta-item">widget: <b>${d.widget_type}</b></span>
+            </div>
           </div>
         </div>`;
-      toast('token received in ' + d.elapsed_ms + 'ms');
+      toast('Solved in ' + d.elapsed_ms + 'ms');
     } else {
-      result.innerHTML = `
-        <div class="result-box failed">
-          <div class="result-meta" style="color:var(--red);font-size:13px;">
-            FAILED: ${d.error || 'unknown error'}
+      res.innerHTML = `
+        <div class="result failed">
+          <div class="result-head">
+            <div class="result-status err">✕ Failed</div>
           </div>
-          <div class="result-meta">
-            <span>elapsed: ${d.elapsed_ms}ms</span>
-            <span>attempts: ${d.attempts}</span>
-            <span>widget: ${d.widget_type}</span>
+          <div class="result-body">
+            <div style="color:var(--red);font-size:13px;margin-bottom:8px;">${d.error || 'unknown error'}</div>
+            <div class="meta">
+              <span class="meta-item">elapsed: <b>${d.elapsed_ms}ms</b></span>
+              <span class="meta-item">attempts: <b>${d.attempts}</b></span>
+              <span class="meta-item">widget: <b>${d.widget_type}</b></span>
+            </div>
           </div>
         </div>`;
-      toast('solve failed');
+      toast('Solve failed');
     }
   } catch(e) {
-    result.innerHTML = `<div class="result-box failed"><div class="result-meta" style="color:var(--red)">Error: ${e.message}</div></div>`;
-    toast('request failed');
+    res.innerHTML = `<div class="result failed"><div class="result-body" style="color:var(--red);font-size:13px;">${e.message}</div></div>`;
   } finally {
     btn.disabled = false;
-    btn.innerHTML = 'SOLVE';
+    btn.textContent = 'Solve Challenge';
   }
 }
 
-function copyToken(btn) {
-  const text = document.getElementById('tokenText').innerText;
-  navigator.clipboard.writeText(text).then(() => {
-    btn.textContent = 'copied';
-    btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
-    toast('token copied to clipboard');
+function copyToken(btn, token) {
+  navigator.clipboard.writeText(token).then(() => {
+    btn.textContent = 'copied!'; btn.classList.add('done');
+    setTimeout(() => { btn.textContent = 'copy token'; btn.classList.remove('done'); }, 1500);
+    toast('Token copied to clipboard');
   });
 }
 
-// ---- Init ----
-checkHealth();
-refreshStats();
+checkHealth(); refreshStats();
 setInterval(checkHealth, 10000);
 setInterval(refreshStats, 5000);
 </script>
