@@ -276,7 +276,10 @@ class TurnstileSolver:
             return token, ua
         finally:
             try:
-                # Close the context if this page was created with a proxy.
+                page.unroute(url_with_slash)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
                 ctx = getattr(page, "_stealth_context", None)
                 if ctx:
                     ctx.close()
