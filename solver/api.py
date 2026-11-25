@@ -355,82 +355,38 @@ def create_app() -> FastAPI:
         tags=["solver"],
         dependencies=[Depends(_verify_api_key)],
     )
-    # NOTE: ``def`` (not ``async def``) — FastAPI runs sync endpoints in a
-    # threadpool, which is the correct model for sync patchright calls.
-    def solve(req: SolveRequest) -> SolveResponse:
+    async def solve(req: SolveRequest) -> SolveResponse:
         proxy = req.proxy
         if not proxy and req.use_pool_proxy:
             proxy = proxy_manager.rotate()
             if proxy is None:
                 logger.warning("pool_proxy_requested_but_empty")
 
-        logger.info(
-            "solve_request",
-            extra={
-                "url": req.url,
-                "sitekey": req.sitekey[:10] + "...",
-                "widget_type": req.widget_type,
-                "theme": req.theme,
-                "size": req.size,
-                "proxy": bool(proxy),
-            },
-        )
+        logger.info("solve_request", extra={"url": req.url, "sitekey": req.sitekey[:10]+"...", "widget_type": req.widget_type})
 
         solver = get_solver()
         try:
-            result = solver.solve(
-                url=req.url,
-                sitekey=req.sitekey,
-                proxy=proxy,
-                widget_type=req.widget_type,
-                action=req.action,
-                cdata=req.cdata,
-                theme=req.theme,
-                size=req.size,
-                language=req.language,
-                appearance=req.appearance,
-                execution=req.execution,
+            result = await solver.solve(
+                url=req.url, sitekey=req.sitekey, proxy=proxy,
+                widget_type=req.widget_type, action=req.action, cdata=req.cdata,
+                theme=req.theme, size=req.size, language=req.language,
+                appearance=req.appearance, execution=req.execution,
             )
         except TimeoutError as e:
             logger.warning("solve_queue_timeout error=%s", str(e))
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "status": "failed",
-                    "error": f"all browsers busy: {e}",
-                    "elapsed_ms": 0,
-                },
-            )
+            return JSONResponse(status_code=503, content={"status": "failed", "error": f"all browsers busy: {e}", "elapsed_ms": 0})
         metrics.record(result)
-
-        status = result.get("status", "failed")
-        if status != "success":
-            return JSONResponse(
-                status_code=502,
-                content=SolveResponse(**result).model_dump(),
-            )
+        if result.get("status") != "success":
+            return JSONResponse(status_code=502, content=SolveResponse(**result).model_dump())
         return SolveResponse(**result)
 
-    @app.post(
-        "/challenge",
-        tags=["solver"],
-        dependencies=[Depends(_verify_api_key)],
-    )
-    def challenge(req: ChallengeRequest) -> JSONResponse:
-        """Bypass a Cloudflare managed challenge page.
-
-        Navigates to the real URL, waits for the "Just a moment..."
-        interstitial to auto-resolve, and returns the ``cf_clearance``
-        cookie + user agent.
-        """
+    @app.post("/challenge", tags=["solver"], dependencies=[Depends(_verify_api_key)])
+    async def challenge(req: ChallengeRequest) -> JSONResponse:
         solver = get_solver()
         try:
-            result = solver.challenge(url=req.url, proxy=req.proxy)
+            result = await solver.challenge(url=req.url, proxy=req.proxy)
         except TimeoutError as e:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": f"all browsers busy: {e}"},
-            )
+            return JSONResponse(status_code=503, content={"status": "failed", "error": f"all browsers busy: {e}"})
         code = 200 if result.get("status") == "success" else 502
         return JSONResponse(status_code=code, content=result)
 

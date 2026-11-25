@@ -1,21 +1,19 @@
-"""Token polling and widget interaction for the Turnstile solver.
+"""Async token polling and widget interaction.
 
-Optimized for speed: the fast path polls ``window.__tsToken`` via a single
-JS evaluate (sub-millisecond).  Widget detection and cursor clicking happen
-once at the start, not on every poll cycle.
+All Playwright calls are async (``await page.evaluate()``, etc.) to be
+compatible with FastAPI's asyncio event loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
-import time
 from typing import Optional
 
-from patchright.sync_api import Page
+from patchright.async_api import Page
 
 from solver.constants import DEFAULT_UA
-from solver.cursor import Box, Cursor, Point
 
 logger = logging.getLogger("solver.token")
 
@@ -23,38 +21,29 @@ _POLL_INTERVAL_S = 0.15
 _MIN_TOKEN_LEN = 20
 
 
-def wait_for_token(
-    page: Page,
-    timeout: int,
-    widget_type: str,
-) -> Optional[str]:
+async def wait_for_token(page: Page, timeout: int, widget_type: str) -> Optional[str]:
     """Poll for a Turnstile token with a single upfront widget click."""
-    deadline = time.monotonic() + timeout
+    deadline = asyncio.get_event_loop().time() + timeout
 
-    # Phase 1: find and click the widget ONCE (not every poll cycle).
     if widget_type != "invisible":
-        _try_click_widget(page)
+        await _try_click_widget(page)
 
-    # Phase 2: fast poll — just check the token, no bounding boxes.
-    while time.monotonic() < deadline:
-        # Fastest signal: JS callback variable.
-        token = _eval_token(page)
+    while asyncio.get_event_loop().time() < deadline:
+        token = await _eval_token(page)
         if token:
             return token
-        # Fallback: hidden input.
-        token = _read_hidden_input(page)
+        token = await _read_hidden_input(page)
         if token:
             return token
-        # Check for hard errors.
-        _check_error(page)
-        time.sleep(_POLL_INTERVAL_S)
+        await _check_error(page)
+        await asyncio.sleep(_POLL_INTERVAL_S)
 
     return None
 
 
-def extract_useragent(page: Page) -> str:
+async def extract_useragent(page: Page) -> str:
     try:
-        ua = page.evaluate("() => navigator.userAgent")
+        ua = await page.evaluate("() => navigator.userAgent")
         if ua and isinstance(ua, str):
             return ua
     except Exception:
@@ -62,9 +51,9 @@ def extract_useragent(page: Page) -> str:
     return DEFAULT_UA
 
 
-def is_managed_challenge(page: Page) -> bool:
+async def is_managed_challenge(page: Page) -> bool:
     try:
-        return page.evaluate("""() => {
+        return await page.evaluate("""() => {
             const t = (document.title||'') + '\\n' + (document.body?.innerText?.slice(0,2000)||'') + '\\n' + location.href;
             return /just a moment|checking your browser|verify you are human/i.test(t)
                 && /cloudflare|cf-challenge|challenge-platform/i.test(t);
@@ -73,9 +62,9 @@ def is_managed_challenge(page: Page) -> bool:
         return False
 
 
-def get_cf_clearance(page: Page) -> Optional[str]:
+async def get_cf_clearance(page: Page) -> Optional[str]:
     try:
-        for c in page.context.cookies():
+        for c in await page.context.cookies():
             if c.get("name") == "cf_clearance" and len(c.get("value", "")) > 20:
                 return c["value"]
     except Exception:
@@ -83,13 +72,9 @@ def get_cf_clearance(page: Page) -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Internal — kept lightweight for speed
-# ---------------------------------------------------------------------------
-
-def _eval_token(page: Page) -> Optional[str]:
+async def _eval_token(page: Page) -> Optional[str]:
     try:
-        token = page.evaluate("() => window.__tsToken")
+        token = await page.evaluate("() => window.__tsToken")
         if token and isinstance(token, str) and len(token) > _MIN_TOKEN_LEN:
             return token
     except Exception:
@@ -97,9 +82,9 @@ def _eval_token(page: Page) -> Optional[str]:
     return None
 
 
-def _read_hidden_input(page: Page) -> Optional[str]:
+async def _read_hidden_input(page: Page) -> Optional[str]:
     try:
-        val = page.input_value("[name=cf-turnstile-response]", timeout=200)
+        val = await page.input_value("[name=cf-turnstile-response]", timeout=200)
         if val and len(val) > _MIN_TOKEN_LEN:
             return val
     except Exception:
@@ -107,9 +92,9 @@ def _read_hidden_input(page: Page) -> Optional[str]:
     return None
 
 
-def _check_error(page: Page) -> None:
+async def _check_error(page: Page) -> None:
     try:
-        err = page.evaluate("() => window.__tsError")
+        err = await page.evaluate("() => window.__tsError")
         if err:
             raise RuntimeError(f"turnstile_error: {err}")
     except RuntimeError:
@@ -118,14 +103,8 @@ def _check_error(page: Page) -> None:
         pass
 
 
-def _try_click_widget(page: Page) -> None:
-    """Find the Turnstile iframe and click its checkbox once.
-
-    Uses ``page.mouse.click()`` directly — instant, no CDP cursor overhead.
-    The stealth JS handles fingerprinting; the cursor's human-like movement
-    is only needed when Cloudflare checks mouse entropy, which is rare for
-    route-interception solves.
-    """
+async def _try_click_widget(page: Page) -> None:
+    """Find the Turnstile iframe and click its checkbox once."""
     for sel in (
         'iframe[src*="challenges.cloudflare.com"]',
         'iframe[src*="cdn-cgi/challenge-platform"]',
@@ -134,13 +113,12 @@ def _try_click_widget(page: Page) -> None:
     ):
         try:
             loc = page.locator(sel).first
-            bd = loc.bounding_box(timeout=2000)
+            bd = await loc.bounding_box(timeout=2000)
             if not bd or bd["width"] <= 0 or bd["height"] <= 0:
                 continue
-            # Click the checkbox area (x≈30 from left, vertical center).
             x = bd["x"] + 30 + (random.random() - 0.5) * 6
             y = bd["y"] + bd["height"] / 2 + (random.random() - 0.5) * 4
-            page.mouse.click(x, y)
+            await page.mouse.click(x, y)
             return
         except Exception:
             continue
