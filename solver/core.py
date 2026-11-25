@@ -248,10 +248,11 @@ class TurnstileSolver:
         with sync_playwright() as p:
             browser = self._launcher.launch(p, proxy=proxy)
             try:
-                # Use a stealth context (stealth JS pre-injected via
-                # add_init_script) so Cloudflare never sees automation.
-                context = self._launcher.new_context(browser)
-                page = context.new_page()
+                page = browser.new_page()
+                # Inject stealth JS BEFORE any page loads so Cloudflare's
+                # challenge script never sees automation fingerprints.
+                from solver.stealth import get_stealth_js
+                page.add_init_script(get_stealth_js())
                 # Route interception: serve our HTML at the target URL.
                 url_with_slash = url if url.endswith("/") else url + "/"
                 page.route(
