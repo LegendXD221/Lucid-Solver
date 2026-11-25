@@ -121,11 +121,11 @@ def _check_error(page: Page) -> None:
 def _try_click_widget(page: Page) -> None:
     """Find the Turnstile iframe and click its checkbox once.
 
-    Uses the human-like Cursor if CDP is available; falls back to
-    ``page.click()`` otherwise.  Called ONCE at the start of polling,
-    not on every cycle.
+    Uses ``page.mouse.click()`` directly — instant, no CDP cursor overhead.
+    The stealth JS handles fingerprinting; the cursor's human-like movement
+    is only needed when Cloudflare checks mouse entropy, which is rare for
+    route-interception solves.
     """
-    # Find the Turnstile iframe by its src URL (fast, single selector).
     for sel in (
         'iframe[src*="challenges.cloudflare.com"]',
         'iframe[src*="cdn-cgi/challenge-platform"]',
@@ -137,16 +137,10 @@ def _try_click_widget(page: Page) -> None:
             bd = loc.bounding_box(timeout=2000)
             if not bd or bd["width"] <= 0 or bd["height"] <= 0:
                 continue
-            # Compute click point (checkbox is at x≈30 from left).
-            x = bd["x"] + 30 + (random.random() - 0.5) * 8
-            y = bd["y"] + bd["height"] / 2 + (random.random() - 0.5) * 6
-            # Try cursor first, fall back to page.click.
-            try:
-                cursor = Cursor(page)
-                # Brief hesitation, then click.
-                cursor.click(Point(x, y), speed=1.5, hesitate=30, overshoot_threshold=420)
-            except Exception:
-                page.click(sel, timeout=2000, position={"x": 30, "y": bd["height"]/2})
+            # Click the checkbox area (x≈30 from left, vertical center).
+            x = bd["x"] + 30 + (random.random() - 0.5) * 6
+            y = bd["y"] + bd["height"] / 2 + (random.random() - 0.5) * 4
+            page.mouse.click(x, y)
             return
         except Exception:
             continue

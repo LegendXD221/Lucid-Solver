@@ -111,22 +111,10 @@ STEALTH_JS = """
         return originalGetContext.call(this, type, attributes);
     };
 
-    const originalAttachShadow = Element.prototype.attachShadow;
-    Element.prototype.attachShadow = function(...args) {
-        const shadow = originalAttachShadow.apply(this, args);
-        shadow.mode = 'open';
-        return shadow;
-    };
-
-    if (window.HTMLElement.prototype.hasOwnProperty('offsetHeight')) {
-        const originalOffsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
-        Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
-            get() {
-                const val = originalOffsetHeight.get.call(this);
-                return val === 0 ? 1 : val;
-            },
-        });
-    }
+    // NOTE: attachShadow and offsetHeight patches removed — they can
+    // break Turnstile widget rendering (shadow DOM encapsulation and
+    // visibility checks).  The patches above are sufficient for
+    // anti-detection.
 
     const originalToString = Function.prototype.toString;
     Function.prototype.toString = function() {
