@@ -120,7 +120,7 @@ class TurnstileSolver:
     async def challenge(self, url: str, proxy: Optional[str] = None, timeout: Optional[int] = None) -> dict:
         t = timeout or max(self.timeout, 30)
         started = time.monotonic()
-        pool_idx, launcher = self._pool.acquire()
+        pool_idx, launcher = await self._pool.acquire()
         try:
             page = await launcher.new_page(proxy=proxy)
             try:
@@ -161,7 +161,7 @@ class TurnstileSolver:
             cdata=cdata, theme=theme, size=size, language=language, appearance=appearance, execution=execution)
         html = render_html(config)
 
-        pool_idx, launcher = self._pool.acquire()
+        pool_idx, launcher = await self._pool.acquire()
         t0 = time.monotonic()
         try:
             page = await launcher.new_page(proxy=proxy)
