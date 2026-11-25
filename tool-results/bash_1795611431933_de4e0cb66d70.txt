@@ -1,0 +1,1621 @@
+========== latcf/__init__.py ==========
+# latcf / __init__
+
+from .browser import Challenger, latch, latch_context
+from .solver import (
+    Latitude,
+    ContextSlate,
+    Slate,
+    CFData,
+    CFCookie,
+    TurnstileResp,
+    TurnstileWidget,
+    CFField,
+    StorageEntry,
+    relate,
+    elate,
+    translate,
+    collate,
+    slate_once,
+)
+from .cursor import Lateral, Point, Box
+from .agent import plate, plate_context
+from .stealth import get_stealth_js, get_launch_args, apply_stealth
+
+__version__ = "1.0.4"
+__all__ = [
+    "Challenger",
+    "latch",
+    "latch_context",
+    "Latitude",
+    "ContextSlate",
+    "Slate",
+    "CFData",
+    "CFCookie",
+    "TurnstileResp",
+    "TurnstileWidget",
+    "CFField",
+    "StorageEntry",
+    "relate",
+    "elate",
+    "translate",
+    "collate",
+    "slate_once",
+    "Lateral",
+    "Point",
+    "Box",
+    "plate",
+    "plate_context",
+]
+
+========== latcf/agent.py ==========
+# latcf / agent
+
+import platform
+import subprocess
+import os
+import json
+import re
+from typing import Optional, List
+
+
+def _plat_token() -> str:
+    s = platform.system()
+    if s == "Darwin":
+        return "Macintosh; Intel Mac OS X 10_15_7"
+    if s == "Linux":
+        return "X11; Linux x86_64"
+    return "Windows NT 10.0; Win64; x64"
+
+
+def _parse_ver(text: str) -> Optional[str]:
+    m = re.search(r"\d+(?:\.\d+){1,3}", text)
+    return m.group(0) if m else None
+
+
+def _read_chrome_ver(executable: str) -> Optional[str]:
+    if platform.system() == "Windows":
+        try:
+            script = f'(Get-Item -LiteralPath {json.dumps(executable)}).VersionInfo.ProductVersion'
+            out = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", script],
+                capture_output=True, text=True, timeout=10,
+            )
+            return _parse_ver(out.stdout or "")
+        except Exception:
+            return None
+    try:
+        out = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=10)
+        return _parse_ver((out.stdout or "") + " " + (out.stderr or ""))
+    except Exception:
+        return None
+
+
+def _chrome_paths(channel: str = "") -> List[str]:
+    if platform.system() != "Windows":
+        if "edge" in channel:
+            return ["microsoft-edge", "microsoft-edge-stable"]
+        return ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "microsoft-edge-stable"]
+    dirs = [os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.environ.get("LocalAppData")]
+    dirs = [d for d in dirs if d]
+    subs = {
+        "edge": os.path.join("Microsoft", "Edge", "Application", "msedge.exe"),
+        "msedge": os.path.join("Microsoft", "Edge", "Application", "msedge.exe"),
+        "canary": os.path.join("Google", "Chrome SxS", "Application", "chrome.exe"),
+        "beta": os.path.join("Google", "Chrome Beta", "Application", "chrome.exe"),
+        "dev": os.path.join("Google", "Chrome Dev", "Application", "chrome.exe"),
+        "chrome": os.path.join("Google", "Chrome", "Application", "chrome.exe"),
+    }
+    variant = next((k for k in subs if k in channel), None)
+    sub = subs[variant] if variant else subs["msedge"]
+    if variant == "canary":
+        return [os.path.join(os.environ.get("LocalAppData", ""), sub)]
+    return [os.path.join(d, sub) for d in dirs]
+
+
+def _read_bundled_ver() -> Optional[str]:
+    try:
+        import patchright._impl._driver as drv
+        browsers_path = os.path.join(os.path.dirname(drv.__file__), "browsers.json")
+        if os.path.exists(browsers_path):
+            with open(browsers_path, "r") as f:
+                data = json.load(f)
+            for b in data.get("browsers", []):
+                if b.get("name") == "chromium":
+                    return b.get("browserVersion")
+    except Exception:
+        pass
+    return None
+
+
+def plate(executable_path: Optional[str] = None, channel: Optional[str] = None) -> Optional[str]:
+    env = os.environ.get("LAT_CF_HEADLESS_UA")
+    if env == "0":
+        return None
+    if env:
+        return env
+    version = None
+    if executable_path:
+        version = _read_chrome_ver(executable_path)
+    if not version and channel:
+        for p in _chrome_paths(channel):
+            if os.path.exists(p):
+                version = _read_chrome_ver(p)
+                if version:
+                    break
+    if not version:
+        for p in _chrome_paths(channel or ""):
+            if os.path.exists(p):
+                version = _read_chrome_ver(p)
+                if version:
+                    break
+    if not version:
+        version = _read_bundled_ver() or "148.0.0.0"
+    major = version.split(".")[0]
+    return " ".join([
+        "Mozilla/5.0",
+        f"({_plat_token()})",
+        "AppleWebKit/537.36",
+        "(KHTML, like Gecko)",
+        f"Chrome/{major}.0.0.0",
+        "Safari/537.36",
+    ])
+
+
+def plate_context(options: dict, headless: bool = True) -> dict:
+    if not headless:
+        return options
+    if options.get("user_agent"):
+        return options
+    ua = plate(
+        executable_path=options.get("executable_path"),
+        channel=options.get("channel"),
+    )
+    if ua:
+        options = {**options, "user_agent": ua}
+    return options
+
+========== latcf/browser.py ==========
+# latcf / browser
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import os
+import tempfile
+from typing import Optional, Union, List
+
+from patchright.async_api import async_playwright, Browser, BrowserContext, Page
+
+from .solver import Latitude, ContextSlate, Slate
+from .solver import relate, elate, translate, collate, slate_once
+from .cursor import Lateral, Point
+from .agent import plate, plate_context
+from .stealth import get_stealth_js, get_launch_args, apply_stealth
+
+_BROWSERS_CHECKED = False
+
+
+def _ensure_browsers():
+    global _BROWSERS_CHECKED
+    if _BROWSERS_CHECKED:
+        return
+    _BROWSERS_CHECKED = True
+    for browser in ['chromium', 'msedge']:
+        try:
+            subprocess.run(
+                [sys.executable, '-m', 'patchright', 'install', browser],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=600,
+            )
+        except Exception:
+            pass
+
+
+def _resolve_channel(channel, executable_path):
+    if channel or executable_path:
+        return channel
+    return "msedge"
+
+
+class Challenger:
+    def __init__(self):
+        self._pw = None
+        self._ctx: Optional[BrowserContext] = None
+        self._headless = False
+        self._ua: Optional[str] = None
+        self._user_data_dir: Optional[str] = None
+        self._owns_dir = False
+
+    async def latch(
+        self,
+        headless: bool = False,
+        channel: Optional[str] = None,
+        executable_path: Optional[str] = None,
+        turnstile: Union[bool, Latitude] = True,
+        stealth: bool = True,
+        user_data_dir: Optional[str] = None,
+        **kwargs,
+    ) -> "Challenger":
+        _ensure_browsers()
+        pw = await async_playwright().start()
+        self._pw = pw
+        self._headless = headless
+        channel = _resolve_channel(channel, executable_path)
+
+        opts: dict = {**kwargs, "headless": headless}
+        if channel:
+            opts["channel"] = channel
+        if executable_path:
+            opts["executable_path"] = executable_path
+
+        opts["ignore_default_args"] = ["--enable-automation"]
+
+        if stealth:
+            existing_args: List[str] = opts.get("args", [])
+            if isinstance(existing_args, list):
+                opts["args"] = existing_args + get_launch_args()
+            else:
+                opts["args"] = get_launch_args()
+        else:
+            existing_args: List[str] = opts.get("args", [])
+            if isinstance(existing_args, list):
+                opts["args"] = existing_args + ["--disable-blink-features=AutomationControlled"]
+            else:
+                opts["args"] = ["--disable-blink-features=AutomationControlled"]
+
+        if not headless and "no_viewport" not in opts:
+            opts["no_viewport"] = True
+        if headless:
+            self._ua = plate(executable_path=executable_path, channel=channel)
+            if self._ua and "user_agent" not in opts:
+                opts["user_agent"] = self._ua
+
+        if user_data_dir:
+            self._user_data_dir = user_data_dir
+        else:
+            self._user_data_dir = os.path.join(tempfile.gettempdir(), "latcf_profile")
+            self._owns_dir = True
+
+        self._ctx = await pw.chromium.launch_persistent_context(self._user_data_dir, **opts)
+
+        if stealth:
+            await apply_stealth(self._ctx)
+        if turnstile:
+            solver_opts = turnstile if isinstance(turnstile, Latitude) else Latitude()
+            solver = ContextSlate(self._ctx, solver_opts)
+            await solver.install()
+
+        return self
+
+    async def new_page(self, **kwargs) -> Page:
+        if not self._ctx:
+            raise RuntimeError("Browser not launched. Call latch() first.")
+        return await self._ctx.new_page()
+
+    @property
+    def context(self) -> Optional[BrowserContext]:
+        return self._ctx
+
+    @property
+    def pages(self) -> List[Page]:
+        if self._ctx:
+            return self._ctx.pages
+        return []
+
+    async def close(self):
+        if self._ctx:
+            await self._ctx.close()
+        if self._pw:
+            await self._pw.stop()
+
+
+async def latch(
+    headless: bool = False,
+    channel: Optional[str] = None,
+    executable_path: Optional[str] = None,
+    turnstile: Union[bool, Latitude] = True,
+    stealth: bool = True,
+    user_data_dir: Optional[str] = None,
+    **kwargs,
+) -> Challenger:
+    cb = Challenger()
+    await cb.latch(headless=headless, channel=channel, executable_path=executable_path, turnstile=turnstile, stealth=stealth, user_data_dir=user_data_dir, **kwargs)
+    return cb
+
+
+async def latch_context(
+    user_data_dir: str,
+    headless: bool = False,
+    channel: Optional[str] = None,
+    turnstile: Union[bool, Latitude] = True,
+    stealth: bool = True,
+    **kwargs,
+) -> BrowserContext:
+    _ensure_browsers()
+    pw = await async_playwright().start()
+    channel = _resolve_channel(channel, kwargs.get("executable_path"))
+    opts: dict = {**kwargs, "headless": headless}
+    if channel:
+        opts["channel"] = channel
+
+    opts["ignore_default_args"] = ["--enable-automation"]
+
+    if stealth:
+        existing_args: List[str] = opts.get("args", [])
+        if isinstance(existing_args, list):
+            opts["args"] = existing_args + get_launch_args()
+        else:
+            opts["args"] = get_launch_args()
+    else:
+        existing_args: List[str] = opts.get("args", [])
+        if isinstance(existing_args, list):
+            opts["args"] = existing_args + ["--disable-blink-features=AutomationControlled"]
+        else:
+            opts["args"] = ["--disable-blink-features=AutomationControlled"]
+
+    if not headless and "no_viewport" not in opts:
+        opts["no_viewport"] = True
+    if headless:
+        ua = plate(channel=channel)
+        if ua and "user_agent" not in opts:
+            opts["user_agent"] = ua
+    ctx = await pw.chromium.launch_persistent_context(user_data_dir, **opts)
+    if stealth:
+        await apply_stealth(ctx)
+    if turnstile:
+        solver_opts = turnstile if isinstance(turnstile, Latitude) else Latitude()
+        solver = ContextSlate(ctx, solver_opts)
+        await solver.install()
+    return ctx
+
+========== latcf/cursor.py ==========
+# latcf / cursor
+
+import math
+import random
+import time
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+from patchright.async_api import Page, CDPSession
+
+
+@dataclass
+class Point:
+    x: float
+    y: float
+
+
+@dataclass
+class TimedVector:
+    x: float
+    y: float
+    timestamp: float
+
+
+@dataclass
+class Box:
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+_OVERSHOOT = 500
+_JITTER = 1.5
+_WIND = 0.25
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return min(hi, max(lo, v))
+
+
+def _dist(a: Point, b: Point) -> float:
+    return math.hypot(b.x - a.x, b.y - a.y)
+
+
+def _add(a: Point, b: Point) -> Point:
+    return Point(a.x + b.x, a.y + b.y)
+
+
+def _sub(a: Point, b: Point) -> Point:
+    return Point(a.x - b.x, a.y - b.y)
+
+
+def _mul(a: Point, s: float) -> Point:
+    return Point(a.x * s, a.y * s)
+
+
+def _mag(a: Point) -> float:
+    return math.hypot(a.x, a.y)
+
+
+def _unit(a: Point) -> Point:
+    m = _mag(a)
+    return Point(a.x / m, a.y / m) if m != 0 else Point(0, 0)
+
+
+def _perp(a: Point) -> Point:
+    return Point(-a.y, a.x)
+
+
+def _gauss(mean: float = 0, std: float = 1) -> float:
+    u = random.random()
+    while u == 0:
+        u = random.random()
+    v = random.random()
+    while v == 0:
+        v = random.random()
+    return mean + std * math.sqrt(-2 * math.log(u)) * math.cos(2 * math.pi * v)
+
+
+def _gauss_clamp(mean: float, std: float, lo: float, hi: float) -> float:
+    return _clamp(_gauss(mean, std), lo, hi)
+
+
+def _rand(lo: float, hi: float) -> float:
+    return lo + random.random() * (hi - lo)
+
+
+def _ease_io(t: float) -> float:
+    return (1 - math.cos(math.pi * t)) / 2
+
+
+def _inv_ease_io(y: float) -> float:
+    return math.acos(1 - 2 * _clamp(y, 0, 1)) / math.pi
+
+
+def _fitts(distance: float, target_w: float, speed: float) -> float:
+    b = 150
+    idx = math.log2(distance / target_w + 1)
+    base = (b * idx) / max(0.01, speed)
+    return max(50, base * (1 + _gauss(0, 0.05)))
+
+
+def _bezier(p0: Point, p1: Point, p2: Point, p3: Point, t: float) -> Point:
+    u = 1 - t
+    return Point(
+        u**3 * p0.x + 3 * u**2 * t * p1.x + 3 * u * t**2 * p2.x + t**3 * p3.x,
+        u**3 * p0.y + 3 * u**2 * t * p1.y + 3 * u * t**2 * p2.y + t**3 * p3.y,
+    )
+
+
+def _ctrl_pts(start: Point, end: Point) -> Tuple[Point, Point]:
+    length = _dist(start, end)
+    d = _sub(end, start)
+    spread = _clamp(length * 0.35, 5, 220)
+    pd = _perp(_unit(d))
+    s1 = 1 if random.random() < 0.5 else -1
+    s2 = -s1 if random.random() < 0.35 else s1
+    t1 = _rand(0.15, 0.45)
+    t2 = _rand(0.55, 0.85)
+    o1 = spread * _rand(0.2, 1.0) * s1
+    o2 = spread * _rand(0.2, 0.9) * s2
+    return (
+        _add(_add(start, _mul(d, t1)), _mul(pd, o1)),
+        _add(_add(start, _mul(d, t2)), _mul(pd, o2)),
+    )
+
+
+def _tremor(pts: list, amp: float) -> list:
+    if amp <= 0 or len(pts) < 3:
+        return pts
+    out = []
+    for i, p in enumerate(pts):
+        if i == len(pts) - 1:
+            out.append(p)
+            continue
+        prev = ptsax(0, i - 1)]
+        nxt = ptsin(len(pts) - 1, i + 1)]
+        d = _unit(_sub(nxt, prev))
+        pd = _perp(d)
+        np_ = _gauss(0, amp)
+        na = _gauss(0, amp * 0.25)
+        out.append(Point(p.x + pd.x * np_ + d.x * na, p.y + pd.y * np_ + d.y * na))
+    return out
+
+
+def _wind_drift(pts: list, strength: float) -> list:
+    if strength <= 0 or len(pts) < 3:
+        return pts
+    n = len(pts)
+    res = list(pts)
+    wx = wy = 0.0
+    cap = strength * 10
+    for i in range(1, n - 1):
+        prog = i / (n - 1)
+        decay = 1 - prog**1.5
+        wx += _gauss(0, strength * 0.6)
+        wy += _gauss(0, strength * 0.6)
+        wm = math.hypot(wx, wy)
+        if wm > cap:
+            wx, wy = wx / wm * cap, wy / wm * cap
+        res[i] = Point(res[i].x + wx * decay, res[i].y + wy * decay)
+    return res
+
+
+def _spatial(start: Point, end: Point, jitter: float = _JITTER, wind: float = _WIND, speed: float = 1.0) -> list:
+    length = _dist(start, end)
+    if length < 1:
+        return [Point(end.x, end.y)]
+    total_ms = _fitts(length, 80, speed)
+    sv = 1 + _gauss(0, 0.08)
+    steps = _clamp(math.ceil(total_ms * sv / 8), 8, 250)
+    c1, c2 = _ctrl_pts(start, end)
+    raw = [_bezier(start, c1, c2, end, i / steps) for i in range(1, steps + 1)]
+    raw[-1] = Point(end.x, end.y)
+    w = _wind_drift(raw, wind)
+    n = _tremor(w, jitter)
+    n[-1] = Point(end.x, end.y)
+    return n
+
+
+def _stamp(pts: list, total_ms: float) -> list:
+    n = len(pts)
+    if n == 0:
+        return []
+    now = time.time() * 1000
+    if n == 1:
+        return [TimedVector(pts[0].x, pts[0].y, now)]
+    pause_count = 0 if random.random() < 0.4 else (1 if random.random() < 0.7 else 2)
+    pauses = set()
+    for _ in range(pause_count):
+        pauses.add(int(_rand(n * 0.2, n * 0.8)))
+    acc = 0
+    out = []
+    for i, pt in enumerate(pts):
+        sf = i / (n - 1)
+        tf = _inv_ease_io(sf)
+        ts = now + round(tf * total_ms)
+        if i in pauses:
+            acc += round(_rand(8, 35))
+        ts += acc
+        out.append(TimedVector(pt.x, pt.y, ts))
+    return out
+
+
+def _micro_correct(current: Point, target: Point) -> Tuple[list, float]:
+    d = _dist(current, target)
+    if d < 0.5:
+        return [Point(target.x, target.y)], 15
+    of = _rand(0.06, 0.22)
+    over = _add(target, _mul(_sub(target, current), of))
+    pts = [
+        Point(over.x + _gauss(0, 0.8), over.y + _gauss(0, 0.8)),
+        Point(target.x + _gauss(0, 0.4), target.y + _gauss(0, 0.4)),
+        Point(target.x, target.y),
+    ]
+    return pts, _clamp(d * 2, 20, 80)
+
+
+def _overshoot(start: Point, end: Point) -> Point:
+    length = _dist(start, end)
+    if length < 1:
+        return end
+    d = _unit(_sub(end, start))
+    pd = _perp(d)
+    od = _rand(8, min(60, length * 0.08))
+    lat = _gauss(0, 6)
+    return Point(end.x + d.x * od + pd.x * lat, end.y + d.y * od + pd.y * lat)
+
+
+def _idle_jitter(center: Point, duration_ms: float, amp: float = 1.2) -> list:
+    if duration_ms <= 0:
+        return []
+    hz = 15
+    count = max(2, int(duration_ms / 1000 * hz))
+    interval = duration_ms / count
+    now = time.time() * 1000
+    out = []
+    for i in range(count):
+        out.append(TimedVector(center.x + _gauss(0, amp), center.y + _gauss(0, amp), now + i * interval))
+    out.append(TimedVector(center.x, center.y, now + duration_ms))
+    return out
+
+
+class Lateral:
+    def __init__(self, page: Page, start: Optional[Point] = None):
+        self._page = page
+        self._loc = start or Point(round(100 + random.random() * 400), round(80 + random.random() * 300))
+        self._cdp: Optional[CDPSession] = None
+
+    async def _get_cdp(self) -> CDPSession:
+        if self._cdp is None:
+            self._cdp = await self._page.context.new_cdp_session(self._page)
+        return self._cdp
+
+    async def _wait(self, ms: float):
+        if ms and ms > 0:
+            await self._page.wait_for_timeout(ms)
+
+    async def _dispatch(self, path: list):
+        if not path:
+            return
+        cdp = await self._get_cdp()
+        base = path[0].timestamp
+        start = time.time() * 1000
+        for pt in path:
+            if self._page.is_closed():
+                return
+            scheduled = pt.timestamp - base
+            elapsed = time.time() * 1000 - start
+            delay = scheduled - elapsed
+            if delay > 0:
+                await self._wait(delay)
+            try:
+                ts_j = _gauss(0, 0.002)
+                await cdp.send("Input.dispatchMouseEvent", {
+                    "type": "mouseMoved",
+                    "x": pt.x,
+                    "y": pt.y,
+                    "timestamp": pt.timestamp / 1000 + ts_j,
+                })
+            except Exception:
+                if not self._page.is_closed():
+                    raise
+                return
+
+    async def _move_direct(self, dest: Point, speed: float = 1.0, jitter: float = _JITTER, wind: float = _WIND, micro: bool = True):
+        length = _dist(self._loc, dest)
+        if length < 0.5:
+            self._loc = Point(dest.x, dest.y)
+            return
+        total_ms = _fitts(length, 80, speed)
+        spatial = _spatial(self._loc, dest, jitter, wind, speed)
+        timed = _stamp(spatial, total_ms)
+        if micro and length > 5:
+            last = timed[-1]
+            corr_pts, corr_ms = _micro_correct(Point(last.x, last.y), dest)
+            base = last.timestamp
+            corr_timed = [
+                TimedVector(p.x, p.y, base + round((i + 1) / len(corr_pts) * corr_ms))
+                for i, p in enumerate(corr_pts)
+            ]
+            await self._dispatch(timed[:-1] + corr_timed)
+        else:
+            await self._dispatch(timed)
+        self._loc = Point(dest.x, dest.y)
+
+    async def move_to(self, dest: Point, speed: float = 1.0, jitter: float = _JITTER, wind: float = _WIND, overshoot_threshold: float = _OVERSHOOT, move_delay: float = 0, random_delay: bool = True):
+        if _dist(self._loc, dest) > overshoot_threshold:
+            over = _overshoot(self._loc, dest)
+            await self._move_direct(over, speed=speed * 1.3, micro=False)
+        await self._move_direct(dest, speed=speed, jitter=jitter, wind=wind)
+        d = move_delay * random.random() if random_delay else move_delay
+        await self._wait(d)
+
+    async def click(self, target: Point, button: str = "left", click_count: int = 1, speed: float = 1.0, hesitate: float = 0, hold_ms: Optional[float] = None, overshoot_threshold: float = 420):
+        await self.move_to(target, speed=speed, overshoot_threshold=overshoot_threshold)
+        if hesitate > 0:
+            jpath = _idle_jitter(self._loc, hesitate, 0.9)
+            await self._dispatch(jpath)
+        cdp = await self._get_cdp()
+        for idx in range(1, max(1, click_count) + 1):
+            sx = self._loc.x + _gauss(0, 0.3)
+            sy = self._loc.y + _gauss(0, 0.3)
+            ts_j = _gauss(0, 0.0015)
+            await cdp.send("Input.dispatchMouseEvent", {
+                "type": "mousePressed",
+                "x": sx, "y": sy,
+                "button": button,
+                "clickCount": idx,
+                "timestamp": time.time() + ts_j,
+            })
+            hold = hold_ms if hold_ms is not None else round(_gauss_clamp(85, 20, 45, 140))
+            await self._wait(hold)
+            await cdp.send("Input.dispatchMouseEvent", {
+                "type": "mouseReleased",
+                "x": sx, "y": sy,
+                "button": button,
+                "clickCount": idx,
+                "timestamp": time.time() + ts_j,
+            })
+            if idx < click_count:
+                inter = hold_ms if hold_ms is not None else round(_gauss_clamp(70, 15, 35, 110))
+                await self._wait(inter)
+
+    async def double_click(self, target: Point, button: str = "left", speed: float = 1.0):
+        await self.move_to(target, speed=speed)
+        cdp = await self._get_cdp()
+        sx = self._loc.x + _gauss(0, 0.3)
+        sy = self._loc.y + _gauss(0, 0.3)
+        await cdp.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": sx, "y": sy, "button": button, "clickCount": 1, "timestamp": time.time()})
+        await self._wait(round(_rand(55, 90)))
+        await cdp.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": sx, "y": sy, "button": button, "clickCount": 1, "timestamp": time.time()})
+        await self._wait(round(_rand(90, 200)))
+        drift = Point(self._loc.x + _gauss(0, 1.2), self._loc.y + _gauss(0, 1.2))
+        await self._move_direct(drift, speed=4, micro=False, jitter=0, wind=0)
+        sx2 = self._loc.x + _gauss(0, 0.3)
+        sy2 = self._loc.y + _gauss(0, 0.3)
+        await cdp.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": sx2, "y": sy2, "button": button, "clickCount": 2, "timestamp": time.time()})
+        await self._wait(round(_rand(55, 90)))
+        await cdp.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": sx2, "y": sy2, "button": button, "clickCount": 2, "timestamp": time.time()})
+
+    async def scroll(self, target: Point, delta_x: float = 0, delta_y: float = 300, steps: int = 6, step_delay: float = 60):
+        await self.move_to(target)
+        steps = _clamp(steps, 1, 50)
+        cdp = await self._get_cdp()
+        for i in range(steps):
+            delay = step_delay + _gauss(0, step_delay * 0.2)
+            await self._wait(delay)
+            try:
+                await cdp.send("Input.dispatchMouseEvent", {
+                    "type": "mouseWheel",
+                    "x": self._loc.x, "y": self._loc.y,
+                    "deltaX": delta_x / steps,
+                    "deltaY": delta_y / steps,
+                    "timestamp": time.time(),
+                })
+            except Exception:
+                if not self._page.is_closed():
+                    raise
+                return
+
+    async def hover(self, target: Point, duration: float = 500, jitter: float = _JITTER, speed: float = 1.0):
+        await self.move_to(target, speed=speed)
+        jpath = _idle_jitter(target, duration, jitter)
+        await self._dispatch(jpath)
+
+    @property
+    def location(self) -> Point:
+        return Point(self._loc.x, self._loc.y)
+
+========== latcf/solver.py ==========
+# latcf / solver
+
+import asyncio
+import random
+import re
+import time
+from dataclasses import dataclass, field
+from typing import Optional, Callable, List, Dict
+
+from patchright.async_api import Page, BrowserContext, Locator, ElementHandle
+
+from .cursor import Lateral, Point, Box
+
+_TURNSTILE_SEL = [
+    'iframe[src*="challenges.cloudflare.com"]',
+    'iframe[title*="Cloudflare"]',
+    'iframe[title*="challenge"]',
+    ".cf-turnstile",
+    "[data-sitekey]",
+    '[name="cf-turnstile-response"]',
+    'input[name="cf-turnstile-response"]',
+    'textarea[name="cf-turnstile-response"]',
+    'input[name="turnstile-response"]',
+    'textarea[name="turnstile-response"]',
+    'input[name="turnstile-token"]',
+    'textarea[name="turnstile-token"]',
+    "[data-cf-turnstile-response]",
+    "[data-turnstile-response]",
+    "[data-turnstile-token]",
+]
+
+_RESP_SEL = [
+    '[name="cf-turnstile-response"]',
+    'input[name="cf-turnstile-response"]',
+    'textarea[name="cf-turnstile-response"]',
+    'input[name="turnstile-response"]',
+    'textarea[name="turnstile-response"]',
+    'input[name="turnstile-token"]',
+    'textarea[name="turnstile-token"]',
+    "[data-cf-turnstile-response]",
+    "[data-turnstile-response]",
+    "[data-turnstile-token]",
+]
+
+_CF_FIELD = (
+    'input[name*="cf-" i], input[name*="cf_" i], input[name*="turnstile" i], '
+    'textarea[name*="cf-" i], textarea[name*="cf_" i], textarea[name*="turnstile" i], '
+    "[data-ray], [data-cf-ray], [data-sitekey], [data-cf-turnstile-response]"
+)
+
+_FALLBACK = ["iframe", "div", "button", '[role="checkbox"]']
+_FALL_LIMIT = 80
+_MIN_TOK = 20
+
+
+@dataclass
+class Latitude:
+    timeout_ms: int = 3000
+    interval_ms: int = 500
+    selectors: List[str] = field(default_factory=lambda: list(_TURNSTILE_SEL))
+    max_candidates: int = 5
+    foreground: bool = True
+    click_delay_ms: int = 35
+    mouse_move_steps: int = 8
+    wait_after_click_ms: int = 100
+    click_cooldown_ms: int = 5000
+    max_click_cooldown_ms: int = 45000
+    managed_timeout_ms: int = 45000
+    logger: Optional[Callable[[str], None]] = None
+
+
+@dataclass
+class CFCookie:
+    name: str
+    value: str
+    domain: Optional[str] = None
+    path: Optional[str] = None
+    expires: Optional[float] = None
+
+
+@dataclass
+class TurnstileResp:
+    source: str
+    value: str
+
+
+@dataclass
+class TurnstileWidget:
+    sitekey: Optional[str] = None
+    action: Optional[str] = None
+    c_data: Optional[str] = None
+    callback: Optional[str] = None
+    theme: Optional[str] = None
+    size: Optional[str] = None
+    language: Optional[str] = None
+
+
+@dataclass
+class CFField:
+    name: Optional[str] = None
+    value: str = ""
+
+
+@dataclass
+class StorageEntry:
+    key: str
+    value: str
+
+
+@dataclass
+class CFData:
+    url: str = ""
+    user_agent: str = ""
+    document_cookie_names: List[str] = field(default_factory=list)
+    cookies: List[CFCookie] = field(default_factory=list)
+    cf_cookies: List[CFCookie] = field(default_factory=list)
+    clearance: str = ""
+    cf_clearance: str = ""
+    turnstile_present: bool = False
+    turnstile_solved: bool = False
+    turnstile_tokens: List[str] = field(default_factory=list)
+    turnstile_responses: List[TurnstileResp] = field(default_factory=list)
+    turnstile_sitekeys: List[str] = field(default_factory=list)
+    turnstile_widgets: List[TurnstileWidget] = field(default_factory=list)
+    turnstile_iframes: List[str] = field(default_factory=list)
+    turnstile_scripts: List[str] = field(default_factory=list)
+    challenge_cleared: bool = False
+    challenge_managed: bool = False
+    challenge_fields: List[CFField] = field(default_factory=list)
+    challenge_ray_ids: List[str] = field(default_factory=list)
+    storage_local: List[StorageEntry] = field(default_factory=list)
+    storage_session: List[StorageEntry] = field(default_factory=list)
+
+
+def _is_turnstile_box(box: Box) -> bool:
+    return 260 <= box.width <= 340 and 35 <= box.height <= 90
+
+
+def _click_pt(box: Box) -> Point:
+    x_base = 30 if box.width > 80 else box.width / 2
+    x_noise = (random.random() - 0.5) * min(8, box.width * 0.06)
+    y_noise = (random.random() - 0.5) * min(6, box.height * 0.08)
+    return Point(box.x + x_base + x_noise, box.y + box.height / 2 + y_noise)
+
+
+async def _is_managed(page: Page) -> bool:
+    try:
+        return await page.evaluate("""() => {
+            const t = (document.title || '') + '\\n' + (document.body?.innerText?.slice(0, 5000) || '') + '\\n' + document.body?.innerHTML?.slice(0, 3000) + '\\n' + location.href;
+            const hasChallenge = /just a moment|security verification|checking your browser|正在安全验证|安全检查|请验证你是否为真人|请稍候|verify you are human|checking.*browser|attention required/i.test(t);
+            const hasCf = /cloudflare|verify you are not a bot|malicious bots|ray id|__cf_chl_rt_tk|cf-challenge|challenge-platform/i.test(t);
+            if (hasChallenge && hasCf) return true;
+            if (hasChallenge && document.querySelector('script[src*="challenges.cloudflare.com"]')) return true;
+            if (hasChallenge && document.querySelector('#challenge-running, #challenge-stage, .challenge-running')) return true;
+            if (/__cf_chl_rt_tk/.test(location.href) && hasChallenge) return true;
+            if (hasChallenge && document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="cdn-cgi/challenge-platform"]')) return true;
+            if (document.querySelector('iframe[src*="challenges.cloudflare.com"]') && /请稍候|just a moment|安全/i.test(document.title || '')) return true;
+            return false;
+        }""")
+    except Exception:
+        return False
+
+
+async def _frame_ready(loc: Locator) -> bool:
+    try:
+        tag = await loc.evaluate("el => el.tagName?.toLowerCase() || ''")
+        if tag == "iframe":
+            frame = await loc.content_frame
+            if not frame:
+                return False
+            try:
+                await frame.wait_for_selector('input[type="checkbox"]', state="visible", timeout=3000)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return True
+
+
+async def _prep_click(page: Page, foreground: bool):
+    if not foreground:
+        return
+    await page.wait_for_timeout(round(20 + random.random() * 40))
+    await page.bring_to_front()
+    try:
+        await page.evaluate("() => { window.focus(); document.body?.focus?.(); }")
+    except Exception:
+        pass
+
+
+async def _click_box(page: Page, box: Box, cursor: Lateral, opts: Latitude) -> bool:
+    if box.width <= 0 or box.height <= 0:
+        return False
+    pt = _click_pt(box)
+    await _prep_click(page, opts.foreground)
+    if random.random() < 0.6:
+        wx = pt.x + (random.random() - 0.5) * 120
+        wy = pt.y + (random.random() - 0.5) * 80
+        await cursor.move_to(Point(wx, wy), speed=0.7 + random.random() * 0.6)
+        await page.wait_for_timeout(round(80 + random.random() * 200))
+    await page.wait_for_timeout(round(30 + random.random() * 120))
+    steps = max(1, opts.mouse_move_steps + round((random.random() - 0.5) * 4))
+    await cursor.click(pt, speed=max(1, steps), overshoot_threshold=420, hesitate=round(20 + random.random() * 60), hold_ms=opts.click_delay_ms + round((random.random() - 0.5) * 16))
+    if opts.wait_after_click_ms > 0:
+        await page.wait_for_timeout(round(opts.wait_after_click_ms * (0.7 + random.random() * 0.6)))
+    return True
+
+
+async def _click_loc(page: Page, loc: Locator, cursor: Lateral, opts: Latitude) -> bool:
+    try:
+        bd = await loc.bounding_box(timeout=1000)
+    except Exception:
+        return False
+    if not bd:
+        return False
+    box = Box(**bd)
+    if not await _frame_ready(loc):
+        return False
+    pt = _click_pt(box)
+    await _prep_click(page, opts.foreground)
+    if random.random() < 0.6:
+        wx = pt.x + (random.random() - 0.5) * 120
+        wy = pt.y + (random.random() - 0.5) * 80
+        try:
+            await cursor.move_to(Point(wx, wy), speed=0.7 + random.random() * 0.6)
+            await page.wait_for_timeout(round(80 + random.random() * 200))
+        except Exception:
+            pass
+    await page.wait_for_timeout(round(30 + random.random() * 120))
+    try:
+        await cursor.click(pt, speed=max(1, opts.mouse_move_steps), overshoot_threshold=420, hesitate=round(20 + random.random() * 60), hold_ms=opts.click_delay_ms + round((random.random() - 0.5) * 16))
+        if opts.wait_after_click_ms > 0:
+            await page.wait_for_timeout(round(opts.wait_after_click_ms * (0.7 + random.random() * 0.6)))
+        return True
+    except Exception:
+        try:
+            await loc.click(force=True, timeout=1000, delay=opts.click_delay_ms, position={"x": max(1, pt.x - box.x), "y": max(1, pt.y - box.y)})
+            return True
+        except Exception:
+            return False
+
+
+async def _click_elem_tree(page: Page, elem: ElementHandle, cursor: Lateral, opts: Latitude) -> bool:
+    cur = elem
+    for _ in range(8):
+        if not cur:
+            break
+        try:
+            bd = await cur.bounding_box()
+        except Exception:
+            bd = None
+        if bd:
+            box = Box(**bd)
+            if _is_turnstile_box(box):
+                if await _click_box(page, box, cursor, opts):
+                    return True
+        try:
+            parent = await cur.evaluate_handle("el => el.parentElement || (el.getRootNode() instanceof ShadowRoot ? el.getRootNode().host : null)")
+            cur = parent.as_element() if parent else None
+        except Exception:
+            break
+    return False
+
+
+async def _click_turnstile(page: Page, cursor: Lateral, opts: Latitude) -> bool:
+    for sel in ['iframe[src*="challenges.cloudflare.com"]', 'iframe[src*="cdn-cgi/challenge-platform"]']:
+        loc = page.locator(sel)
+        try:
+            count = await loc.count()
+        except Exception:
+            continue
+        for i in range(min(count, opts.max_candidates)):
+            try:
+                bd = await loc.nth(i).bounding_box(timeout=2000)
+                if bd and bd["width"] > 0 and bd["height"] > 0:
+                    box = Box(**bd)
+                    if _is_turnstile_box(box):
+                        pt = _click_pt(box)
+                        await _prep_click(page, opts.foreground)
+                        await page.mouse.click(pt.x, pt.y)
+                        if opts.wait_after_click_ms > 0:
+                            await page.wait_for_timeout(round(opts.wait_after_click_ms * (0.7 + random.random() * 0.6)))
+                        return True
+            except Exception:
+                pass
+    shuffled = list(opts.selectors)
+    random.shuffle(shuffled)
+    for sel in shuffled:
+        if sel in _RESP_SEL:
+            continue
+        loc = page.locator(sel)
+        try:
+            count = await loc.count()
+        except Exception:
+            continue
+        for i in range(min(count, opts.max_candidates)):
+            target = loc.nth(i)
+            if await _click_loc(page, target, cursor, opts):
+                return True
+            try:
+                elem = await target.element_handle(timeout=1000)
+                if elem:
+                    try:
+                        if await _click_elem_tree(page, elem, cursor, opts):
+                            return True
+                    finally:
+                        await elem.dispose()
+            except Exception:
+                pass
+    return False
+
+
+async def _click_fallback(page: Page, cursor: Lateral, opts: Latitude) -> bool:
+    candidates: List[Box] = []
+    for sel in _FALLBACK:
+        loc = page.locator(sel)
+        try:
+            count = min(await loc.count(), _FALL_LIMIT)
+        except Exception:
+            continue
+        for i in range(count):
+            try:
+                bd = await loc.nth(i).bounding_box(timeout=250)
+                if bd:
+                    box = Box(**bd)
+                    if _is_turnstile_box(box):
+                        candidates.append(box)
+            except Exception:
+                pass
+    candidates.sort(key=lambda b: abs(b.width - 300) + abs(b.height - 65))
+    for box in candidates:
+        if await _click_box(page, box, cursor, opts):
+            return True
+    return False
+
+
+async def relate(page: Page, selectors: Optional[List[str]] = None) -> bool:
+    sels = selectors or _TURNSTILE_SEL
+    for sel in sels:
+        loc = page.locator(sel)
+        try:
+            count = await loc.count()
+        except Exception:
+            continue
+        if count == 0:
+            continue
+        if sel not in _RESP_SEL:
+            return True
+        for i in range(min(count, 5)):
+            try:
+                bd = await loc.nth(i).bounding_box(timeout=250)
+                if bd and _is_turnstile_box(Box(**bd)):
+                    return True
+            except Exception:
+                pass
+    for sel in _FALLBACK:
+        loc = page.locator(sel)
+        try:
+            count = min(await loc.count(), _FALL_LIMIT)
+        except Exception:
+            continue
+        for i in range(count):
+            try:
+                bd = await loc.nth(i).bounding_box(timeout=250)
+                if bd and _is_turnstile_box(Box(**bd)):
+                    return True
+            except Exception:
+                pass
+    return False
+
+
+async def elate(page: Page, context: Optional[BrowserContext] = None, urls: Optional[List[str]] = None, min_token_len: int = _MIN_TOK) -> bool:
+    ctx = context or page.context
+    try:
+        cookies = await ctx.cookies(urls or [])
+        if any(c["name"] == "cf_clearance" for c in cookies):
+            return True
+    except Exception:
+        pass
+    try:
+        state = await page.evaluate("""(minLen) => {
+            const inputs = document.querySelectorAll('[name="cf-turnstile-response"], [name="turnstile-response"], [data-cf-turnstile-response]');
+            let tokenFound = false;
+            for (const el of inputs) {
+                const val = el.value || el.getAttribute('data-cf-turnstile-response') || '';
+                if (val.trim().length >= minLen) { tokenFound = true; break; }
+            }
+            const present = document.querySelectorAll('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]').length > 0;
+            return { tokenFound, present };
+        }""", min_token_len)
+        if state.get("present") and not state.get("tokenFound"):
+            return False
+        return bool(state.get("tokenFound"))
+    except Exception:
+        return False
+
+
+async def translate(page: Page) -> bool:
+    return await _is_managed(page)
+
+
+async def collate(page: Page, context: Optional[BrowserContext] = None, urls: Optional[List[str]] = None, min_token_len: int = _MIN_TOK, timeout_ms: int = 7000) -> CFData:
+    ctx = context or page.context
+    solved = await elate(page, ctx, urls, min_token_len)
+    while not solved:
+        await page.wait_for_timeout(500)
+        solved = await elate(page, ctx, urls, min_token_len)
+    start = time.time()
+    has_clearance = False
+    while time.time() - start < timeout_ms / 1000:
+        try:
+            cookies = await ctx.cookies(urls or [])
+            if any(c["name"] == "cf_clearance" for c in cookies):
+                has_clearance = True
+                break
+        except Exception:
+            pass
+        await page.wait_for_timeout(500)
+    try:
+        raw = await page.evaluate("""({ responseSelectors, cfFieldSel, minTokenLen }) => {
+            const responseData = [];
+            const widgets = [];
+            const fields = [];
+            const iframeSrcs = [];
+            const scriptSrcs = [];
+            const sitekeys = [];
+            const rayIds = [];
+            const pushUnique = (arr, val) => { if (val && !arr.includes(val)) arr.push(val); };
+            const valueFor = (el) => {
+                if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return el.value;
+                return el.getAttribute('value') || el.getAttribute('data-cf-turnstile-response') || el.getAttribute('data-turnstile-response') || el.getAttribute('data-turnstile-token') || '';
+            };
+            for (const sel of responseSelectors) {
+                try { document.querySelectorAll(sel).forEach(el => {
+                    const v = valueFor(el).trim();
+                    if (v) { const src = el.hasAttribute('data-cf-turnstile-response') || el.hasAttribute('data-turnstile-response') || el.hasAttribute('data-turnstile-token') ? 'attribute' : 'field'; if (!responseData.some(r => r.value === v)) responseData.push({ source: src, value: v }); }
+                }); } catch(e) {}
+            }
+            document.querySelectorAll('[data-sitekey], .cf-turnstile').forEach(el => {
+                const sk = el.getAttribute('data-sitekey') || undefined;
+                widgets.push({ sitekey: sk, action: el.getAttribute('data-action') || undefined, cData: el.getAttribute('data-cdata') || undefined, callback: el.getAttribute('data-callback') || undefined, theme: el.getAttribute('data-theme') || undefined, size: el.getAttribute('data-size') || undefined, language: el.getAttribute('data-language') || undefined });
+                pushUnique(sitekeys, sk);
+            });
+            document.querySelectorAll('iframe').forEach(iframe => {
+                const src = iframe.getAttribute('src');
+                if (!src || !/cloudflare|turnstile|challenge/i.test(src)) return;
+                pushUnique(iframeSrcs, src);
+                try { const u = new URL(src, location.href); pushUnique(sitekeys, u.searchParams.get('sitekey')); pushUnique(sitekeys, u.searchParams.get('siteKey')); pushUnique(sitekeys, u.searchParams.get('k')); } catch(e) {}
+            });
+            document.querySelectorAll('script[src]').forEach(s => { const src = s.getAttribute('src'); if (src && /cloudflare|turnstile|challenge-platform/i.test(src)) pushUnique(scriptSrcs, src); });
+            try { document.querySelectorAll(cfFieldSel).forEach(el => {
+                const v = valueFor(el).trim(); const n = el.getAttribute('name') || undefined;
+                const rid = el.getAttribute('data-ray') || el.getAttribute('data-cf-ray');
+                pushUnique(rayIds, rid); if (v) fields.push({ name: n, value: v });
+            }); } catch(e) {}
+            const collectStorage = (st) => { const entries = []; for (let i = 0; i < st.length; i++) { const k = st.key(i); if (k && /cloudflare|turnstile|cf[_-]|cfchl|cf_chl|challenge/i.test(k)) entries.push({ key: k, value: st.getItem(k) || '' }); } return entries; };
+            const safeSt = (fn) => { try { return collectStorage(fn()); } catch(e) { return []; } };
+            const safeCookieNames = () => { try { return document.cookie.split(';').map(p => p.trim().split('=')[0]).filter(Boolean); } catch(e) { return []; } };
+            const tokens = responseData.map(r => r.value).filter(v => v.length >= minTokenLen);
+            const present = responseData.length > 0 || widgets.length > 0 || sitekeys.length > 0 || iframeSrcs.some(s => /turnstile/i.test(s));
+            const mText = (document.title || '') + '\\n' + (document.body?.innerText?.slice(0, 5000) || '') + '\\n' + location.href;
+            const managed = /just a moment|security verification|checking your browser/i.test(mText) && /cloudflare|verify you are not a bot|malicious bots|ray id/i.test(mText);
+            return {
+                url: location.href, userAgent: navigator.userAgent, documentCookieNames: safeCookieNames(),
+                turnstile: { present, solved: tokens.length > 0, responses: responseData, tokens: [...new Set(tokens)], sitekeys: [...new Set(sitekeys)], widgets, iframes: [...new Set(iframeSrcs)], scripts: [...new Set(scriptSrcs)] },
+                challenge: { managed, fields, rayIds: [...new Set(rayIds)] },
+                storage: { local: safeSt(() => localStorage), session: safeSt(() => sessionStorage) }
+            };
+        }""", {"responseSelectors": _RESP_SEL, "cfFieldSel": _CF_FIELD, "minTokenLen": min_token_len})
+    except Exception:
+        raw = {}
+    cookies_raw = []
+    try:
+        cookies_raw = await ctx.cookies(urls or [])
+    except Exception:
+        pass
+    cf_cookies = [CFCookie(name=c["name"], value=c["value"], domain=c.get("domain"), path=c.get("path"), expires=c.get("expires")) for c in cookies_raw if re.match(r"^(?:__cf|_cf|cf_)", c["name"], re.IGNORECASE)]
+    all_cookies = [CFCookie(name=c["name"], value=c["value"], domain=c.get("domain"), path=c.get("path"), expires=c.get("expires")) for c in cookies_raw]
+    clearance_val = ""
+    for c in cookies_raw:
+        if c["name"] == "cf_clearance":
+            clearance_val = c["value"]
+            break
+    ts = raw.get("turnstile", {})
+    ch = raw.get("challenge", {})
+    st = raw.get("storage", {})
+    return CFData(
+        url=raw.get("url", ""),
+        user_agent=raw.get("userAgent", ""),
+        document_cookie_names=raw.get("documentCookieNames", []),
+        cookies=all_cookies,
+        cf_cookies=cf_cookies,
+        clearance=clearance_val,
+        cf_clearance=clearance_val,
+        turnstile_present=ts.get("present", False),
+        turnstile_solved=ts.get("solved", False),
+        turnstile_tokens=ts.get("tokens", []),
+        turnstile_responses=[TurnstileResp(source=r.get("source", ""), value=r.get("value", "")) for r in ts.get("responses", [])],
+        turnstile_sitekeys=ts.get("sitekeys", []),
+        turnstile_widgets=[TurnstileWidget(**w) for w in ts.get("widgets", [])],
+        turnstile_iframes=ts.get("iframes", []),
+        turnstile_scripts=ts.get("scripts", []),
+        challenge_cleared=has_clearance,
+        challenge_managed=ch.get("managed", False),
+        challenge_fields=[CFField(name=f.get("name"), value=f.get("value", "")) for f in ch.get("fields", [])],
+        challenge_ray_ids=ch.get("rayIds", []),
+        storage_local=[StorageEntry(key=e.get("key", ""), value=e.get("value", "")) for e in st.get("local", [])],
+        storage_session=[StorageEntry(key=e.get("key", ""), value=e.get("value", "")) for e in st.get("session", [])],
+    )
+
+
+async def _click_managed(page: Page, cursor: Lateral, opts: Latitude) -> bool:
+    try:
+        for sel in ['iframe[src*="challenges.cloudflare.com"]', 'iframe[src*="cdn-cgi/challenge-platform"]']:
+            loc = page.locator(sel)
+            if await loc.count() > 0:
+                try:
+                    bd = await loc.first.bounding_box(timeout=3000)
+                    if bd and bd["width"] > 0 and bd["height"] > 0:
+                        x = bd["x"] + 28 + (random.random() - 0.5) * 8
+                        y = bd["y"] + bd["height"] / 2 + (random.random() - 0.5) * 6
+                        await _prep_click(page, opts.foreground)
+                        await page.mouse.click(x, y)
+                        if opts.wait_after_click_ms > 0:
+                            await page.wait_for_timeout(round(opts.wait_after_click_ms * (0.7 + random.random() * 0.6)))
+                        return True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        checkbox = page.locator('input[type="checkbox"]')
+        if await checkbox.count() > 0:
+            if await _click_loc(page, checkbox.first, cursor, opts):
+                return True
+    except Exception:
+        pass
+    try:
+        btn = page.locator('button:has-text("Verify"), button:has-text("验证"), input[type="submit"]')
+        if await btn.count() > 0:
+            if await _click_loc(page, btn.first, cursor, opts):
+                return True
+    except Exception:
+        pass
+    if await _click_turnstile(page, cursor, opts):
+        return True
+    if await _click_fallback(page, cursor, opts):
+        return True
+    return False
+
+
+async def slate_once(page: Page, cursor: Lateral, opts: Latitude) -> dict:
+    if await elate(page):
+        return {"engaged": False, "status": "solved"}
+    managed = await _is_managed(page)
+    if managed:
+        return {"engaged": False, "status": "managed-challenge"}
+    if await _click_turnstile(page, cursor, opts):
+        return {"engaged": True, "status": "engaged"}
+    if await _click_fallback(page, cursor, opts):
+        return {"engaged": True, "status": "engaged"}
+    return {"engaged": False, "status": "not-found"}
+
+
+class Slate:
+    def __init__(self, page: Page, opts: Optional[Latitude] = None):
+        self._page = page
+        self._opts = opts or Latitude()
+        self._cursor = Lateral(page)
+        self._closed = False
+        self._running = False
+        self._pending = False
+        self._attempts = 0
+        self._next_click_at = 0.0
+        self._task: Optional[asyncio.Task] = None
+        self._last_managed_log = 0.0
+        self._managed_since: Optional[float] = None
+        self._managed_waiting = False
+
+    async def _run(self):
+        if self._closed:
+            return
+        if self._running:
+            self._pending = True
+            return
+        self._running = True
+        self._pending = False
+        try:
+            now = time.time() * 1000
+            if now < self._next_click_at:
+                return
+            if self._managed_waiting:
+                return
+            result = await slate_once(self._page, self._cursor, self._opts)
+            if result["status"] == "managed-challenge":
+                if self._managed_since is None:
+                    self._managed_since = time.time() * 1000
+                    self._managed_waiting = True
+                    self._opts.logger and self._opts.logger("cloudflare managed challenge detected; waiting for auto-resolve")
+                self._next_click_at = time.time() * 1000 + 5000
+                return
+            if result["status"] in ("solved", "not-found"):
+                self._attempts = 0
+                self._next_click_at = 0
+                self._managed_since = None
+                self._managed_waiting = False
+                return
+            if result["engaged"]:
+                self._attempts += 1
+                cd = min(self._opts.max_click_cooldown_ms, self._opts.click_cooldown_ms * min(self._attempts, 6))
+                self._next_click_at = time.time() * 1000 + cd
+                self._opts.logger and self._opts.logger(f"turnstile engaged; cooldown {cd}ms")
+        except Exception as e:
+            self._opts.logger and self._opts.logger(str(e))
+        finally:
+            self._running = False
+            if self._pending and not self._closed:
+                self._schedule()
+
+    def _schedule(self):
+        if self._closed or (self._task and not self._task.done()):
+            return
+        self._task = asyncio.ensure_future(self._run())
+
+    def tick(self):
+        self._schedule()
+
+    async def start(self):
+        self.tick()
+        self._page.on("close", self.stop)
+        self._page.on("framenavigated", lambda: self.tick())
+        while not self._closed:
+            await asyncio.sleep(self._opts.interval_ms / 1000)
+            if self._managed_waiting:
+                elapsed = (time.time() * 1000 - self._managed_since) if self._managed_since else 0
+                if elapsed > self._opts.managed_timeout_ms:
+                    self._managed_waiting = False
+                    self._managed_since = None
+                    self._opts.logger and self._opts.logger("managed challenge timeout; attempting interaction")
+                    if await _click_managed(self._page, self._cursor, self._opts):
+                        self._next_click_at = time.time() * 1000 + self._opts.click_cooldown_ms
+                    else:
+                        try:
+                            await self._page.reload(timeout=15000)
+                        except Exception:
+                            pass
+                        self._next_click_at = time.time() * 1000 + 3000
+                else:
+                    cookies = []
+                    try:
+                        cookies = await self._page.context.cookies()
+                    except Exception:
+                        pass
+                    if any(c["name"] == "cf_clearance" for c in cookies):
+                        self._managed_waiting = False
+                        self._managed_since = None
+                        self._opts.logger and self._opts.logger("managed challenge auto-resolved")
+                    else:
+                        for sel in ['iframe[src*="challenges.cloudflare.com"]', 'iframe[src*="cdn-cgi/challenge-platform"]']:
+                            try:
+                                loc = self._page.locator(sel)
+                                if await loc.count() > 0:
+                                    bd = await loc.first.bounding_box(timeout=2000)
+                                    if bd and bd["width"] > 0 and bd["height"] > 0:
+                                        box = Box(**bd)
+                                        if _is_turnstile_box(box):
+                                            pt = _click_pt(box)
+                                            await self._page.mouse.click(pt.x, pt.y)
+                                            self._opts.logger and self._opts.logger("turnstile widget engaged during managed wait")
+                                            await self._page.wait_for_timeout(round(self._opts.wait_after_click_ms * (0.7 + random.random() * 0.6)))
+                                            break
+                            except Exception:
+                                pass
+            self.tick()
+
+    def stop(self):
+        self._closed = True
+        if self._task and not self._task.done():
+            self._task.cancel()
+
+
+class ContextSlate:
+    def __init__(self, context: BrowserContext, opts: Optional[Latitude] = None):
+        self._context = context
+        self._opts = opts or Latitude()
+        self._watchers: Dict[Page, Slate] = {}
+        self._closed = False
+
+    async def _attach(self, page: Page):
+        if page in self._watchers or self._closed:
+            return
+        w = Slate(page, self._opts)
+        self._watchers[page] = w
+        page.on("close", lambda: self._detach(page))
+        asyncio.ensure_future(w.start())
+
+    def _detach(self, page: Page):
+        w = self._watchers.pop(page, None)
+        if w:
+            w.stop()
+
+    async def install(self):
+        for page in self._context.pages:
+            await self._attach(page)
+        self._context.on("page", lambda p: asyncio.ensure_future(self._attach(p)))
+
+    def uninstall(self):
+        self._closed = True
+        for w in self._watchers.values():
+            w.stop()
+        self._watchers.clear()
+
+========== latcf/stealth.py ==========
+# latcf / stealth
+
+_STEALTH_JS = """
+() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => {
+            const plugins = [
+                { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+            ];
+            plugins.length = 3;
+            return plugins;
+        },
+    });
+
+    Object.defineProperty(navigator, 'languages', {
+        get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+    });
+
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications'
+            ? Promise.resolve({ state: Notification.permission })
+            : originalQuery(parameters)
+    );
+
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(parameter) {
+        if (parameter === 37445) return 'Intel Inc.';
+        if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+        return getParameter.call(this, parameter);
+    };
+
+    if (window.chrome) {
+        const original = window.chrome;
+        const newChrome = {};
+        for (const key of Object.keys(original)) {
+            newChrome[key] = original[key];
+        }
+        newChrome.runtime = {};
+        Object.defineProperty(window, 'chrome', { get: () => newChrome });
+    } else {
+        window.chrome = { runtime: {} };
+    }
+
+    const originalToISOString = Date.prototype.toISOString;
+    Date.prototype.toISOString = function() {
+        const offset = this.getTimezoneOffset();
+        const local = new Date(this.getTime() - offset * 60000);
+        return originalToISOString.call(local);
+    };
+
+    Object.defineProperty(navigator, 'connection', {
+        get: () => ({
+            effectiveType: '4g',
+            rtt: 50,
+            downlink: 10,
+            saveData: false,
+        }),
+    });
+
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+    Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+
+    const originalGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function(type, attributes) {
+        if (type === 'webgl' || type === 'webgl2') {
+            const ctx = originalGetContext.call(this, type, attributes);
+            if (ctx) {
+                const getExt = ctx.getExtension;
+                ctx.getExtension = function(name) {
+                    if (name === 'WEBGL_debug_renderer_info') {
+                        const ext = getExt.call(this, name);
+                        if (ext) {
+                            Object.defineProperty(ext, 'UNMASKED_VENDOR_WEBGL', { value: 0x9245 });
+                            Object.defineProperty(ext, 'UNMASKED_RENDERER_WEBGL', { value: 0x9246 });
+                        }
+                        return ext;
+                    }
+                    return getExt.call(this, name);
+                };
+            }
+            return ctx;
+        }
+        return originalGetContext.call(this, type, attributes);
+    };
+
+    const originalAttachShadow = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function(...args) {
+        const shadow = originalAttachShadow.apply(this, args);
+        shadow.mode = 'open';
+        return shadow;
+    };
+
+    if (window.HTMLElement.prototype.hasOwnProperty('offsetHeight')) {
+        const originalOffsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+        Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+            get() {
+                const val = originalOffsetHeight.get.call(this);
+                return val === 0 ? 1 : val;
+            },
+        });
+    }
+
+    const originalToString = Function.prototype.toString;
+    Function.prototype.toString = function() {
+        if (this === window.navigator.permissions.query) {
+            return 'function query() { [native code] }';
+        }
+        return originalToString.call(this);
+    };
+}
+"""
+
+_LAUNCH_ARGS = [
+    '--disable-blink-features=AutomationControlled',
+    '--disable-features=IsolateOrigins,site-per-process',
+    '--disable-infobars',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-component-update',
+    '--disable-domain-reliability',
+    '--disable-ipc-flooding-protection',
+]
+
+
+def get_stealth_js():
+    return _STEALTH_JS
+
+
+def get_launch_args():
+    return list(_LAUNCH_ARGS)
+
+
+async def apply_stealth(context):
+    await context.add_init_script(_STEALTH_JS)
