@@ -231,7 +231,6 @@ class TurnstileSolver:
         execution: Optional[str],
     ) -> tuple[str, str]:
         """Run one solve attempt. Raises on failure; returns (token, ua)."""
-        # Build the Turnstile widget config + inject into HTML.
         config = build_config(
             sitekey=sitekey,
             widget_type=widget_type,
@@ -245,15 +244,16 @@ class TurnstileSolver:
         )
         html = render_html(config)
 
+        from solver.stealth import get_stealth_js
+        stealth_js = get_stealth_js()
+
+        t0 = time.monotonic()
         with sync_playwright() as p:
             browser = self._launcher.launch(p, proxy=proxy)
+            t_launch = time.monotonic()
             try:
                 page = browser.new_page()
-                # Inject stealth JS BEFORE any page loads so Cloudflare's
-                # challenge script never sees automation fingerprints.
-                from solver.stealth import get_stealth_js
-                page.add_init_script(get_stealth_js())
-                # Route interception: serve our HTML at the target URL.
+                page.add_init_script(stealth_js)
                 url_with_slash = url if url.endswith("/") else url + "/"
                 page.route(
                     url_with_slash,
@@ -264,11 +264,20 @@ class TurnstileSolver:
                     ),
                 )
                 page.goto(url_with_slash, timeout=self.timeout * 1000)
+                t_goto = time.monotonic()
 
                 token = wait_for_token(
                     page, timeout=self.timeout, widget_type=widget_type,
                 )
+                t_token = time.monotonic()
                 ua = extract_useragent(page)
+                logger.info(
+                    "solve_timing launch=%dms goto=%dms token_wait=%dms total=%dms",
+                    int((t_launch - t0) * 1000),
+                    int((t_goto - t_launch) * 1000),
+                    int((t_token - t_goto) * 1000),
+                    int((t_token - t0) * 1000),
+                )
                 if not token:
                     raise RuntimeError("token_empty_after_wait")
                 return token, ua
