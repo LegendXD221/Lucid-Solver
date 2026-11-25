@@ -1,19 +1,21 @@
-"""Browser lifecycle management for the Turnstile solver.
+"""Browser lifecycle management with persistent browser reuse.
 
-Wraps patchright's Chromium launch with stealth configuration:
+Keeps a single browser process alive across solves to avoid the ~1s
+launch overhead per request.  Each solve creates a new page (and
+optionally a new context for per-request proxy) in the existing browser.
 
-* ``channel="chrome"`` — system Google Chrome binary (real fingerprint).
-* ``--user-agent=<realistic UA>`` — strips ``HeadlessChrome``.
-* **Stealth launch args** from ``solver.stealth`` — disables automation
-  signals at the Blink/IPC level.
-* **Stealth JS injection** via ``context.add_init_script()`` — patches
-  ``navigator.webdriver``, plugins, languages, WebGL, chrome.runtime,
-  connection, hardwareConcurrency, deviceMemory, canvas, shadow DOM,
-  offsetHeight, and Function.toString BEFORE any page loads.
+Architecture
+------------
+::
 
-The stealth JS is the single biggest speed win: without it, Turnstile
-detects automation and silently retries/rejects, adding 5-10s of wasted
-time.  With it, the widget solves on the first attempt.
+    BrowserLauncher
+    ├── start()        → launch persistent playwright + browser (once)
+    ├── new_page()     → create a page in the persistent browser (per solve)
+    │   ├── no proxy   → browser.new_page()  (fastest, ~50ms)
+    │   └── with proxy → browser.new_context(proxy=...) + new_page  (~200ms)
+    └── stop()         → close browser + stop playwright (on shutdown)
+
+If the browser crashes, ``new_page()`` detects it and auto-restarts.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import logging
 from typing import Any, Dict, Optional
 from urllib.parse import unquote, urlparse
 
-from patchright.sync_api import Browser, BrowserContext
+from patchright.sync_api import Browser, Page, Playwright
 
 from solver.constants import BROWSER_TYPES, DEFAULT_UA
 from solver.stealth import get_launch_args, get_stealth_js
@@ -31,12 +33,7 @@ logger = logging.getLogger("solver.browser")
 
 
 class BrowserLauncher:
-    """Configures and launches a patchright Chromium browser instance.
-
-    The launcher is created once per solver.  Each ``launch()`` call
-    starts a fresh browser process; ``new_context()`` creates a context
-    with stealth JS pre-injected.
-    """
+    """Manages a persistent patchright browser with stealth configuration."""
 
     def __init__(
         self,
@@ -51,14 +48,48 @@ class BrowserLauncher:
         self.browser_path = browser_path
 
         if self.browser_type not in BROWSER_TYPES:
-            logger.warning(
-                "unsupported browser_type=%s, falling back to chromium",
-                self.browser_type,
-            )
+            logger.warning("unsupported browser_type=%s, falling back to chromium", self.browser_type)
             self.browser_type = "chromium"
 
-    def launch(self, playwright, proxy: Optional[str] = None) -> Browser:
-        """Launch a browser with stealth args."""
+        # Persistent state — initialized lazily on first new_page() call.
+        self._playwright: Optional[Playwright] = None
+        self._browser: Optional[Browser] = None
+
+    # ------------------------------------------------------------------ #
+    # Persistent browser lifecycle
+    # ------------------------------------------------------------------ #
+    def _ensure_browser(self) -> Browser:
+        """Launch the persistent browser if not already running.
+
+        If the browser has crashed (is_closed()), restart it.
+        """
+        if self._browser is not None:
+            try:
+                if not self._browser.is_connected():
+                    raise RuntimeError("browser disconnected")
+                return self._browser
+            except Exception:
+                logger.warning("browser_crashed, restarting")
+                self._browser = None
+                if self._playwright:
+                    try:
+                        self._playwright.stop()
+                    except Exception:
+                        pass
+                    self._playwright = None
+
+        # Start playwright + browser.
+        from patchright.sync_api import sync_playwright
+        self._playwright = sync_playwright().start()
+        self._browser = self._do_launch(self._playwright)
+        logger.info(
+            "browser_started headless=%s type=%s",
+            self.headless, self.browser_type,
+        )
+        return self._browser
+
+    def _do_launch(self, playwright: Playwright, proxy: Optional[str] = None) -> Browser:
+        """Launch a browser instance with stealth args."""
         launch_args = get_launch_args()
         if self.useragent:
             launch_args.append(f"--user-agent={self.useragent}")
@@ -77,19 +108,60 @@ class BrowserLauncher:
         if proxy:
             launch_opts["proxy"] = self.parse_proxy(proxy)
 
-        logger.info(
-            "browser_launch headless=%s type=%s proxy=%s stealth_args=%d",
-            self.headless, self.browser_type, bool(proxy), len(launch_args),
-        )
         return playwright.chromium.launch(**launch_opts)
 
-    def new_context(self, browser: Browser) -> BrowserContext:
-        """Create a browser context with stealth JS pre-injected.
+    def new_page(self, proxy: Optional[str] = None) -> Page:
+        """Create a new page in the persistent browser.
 
-        The stealth JS runs via ``add_init_script()`` which executes before
-        any page's own JavaScript, so Cloudflare's challenge script never
-        sees automation fingerprints.
+        For solves without a proxy, uses ``browser.new_page()`` directly
+        (fastest path, ~50ms).  For solves with a proxy, creates a new
+        context with the proxy and returns a page from it (~200ms).
+
+        Stealth JS is injected via ``page.add_init_script()`` in both cases.
         """
+        browser = self._ensure_browser()
+        stealth_js = get_stealth_js()
+
+        if proxy:
+            context = browser.new_context(
+                user_agent=self.useragent,
+                proxy=self.parse_proxy(proxy),
+            )
+            page = context.new_page()
+            page.add_init_script(stealth_js)
+            # Tag the page so _solve_once can close the context too.
+            page._stealth_context = context  # type: ignore[attr-defined]
+        else:
+            page = browser.new_page()
+            page.add_init_script(stealth_js)
+
+        return page
+
+    def stop(self) -> None:
+        """Close the persistent browser and stop playwright."""
+        if self._browser:
+            try:
+                self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        if self._playwright:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
+        logger.info("browser_stopped")
+
+    # ------------------------------------------------------------------ #
+    # Legacy method (still used by tests and fallback)
+    # ------------------------------------------------------------------ #
+    def launch(self, playwright: Playwright, proxy: Optional[str] = None) -> Browser:
+        """Launch a one-shot browser (legacy, not for persistent use)."""
+        return self._do_launch(playwright, proxy=proxy)
+
+    def new_context(self, browser: Browser):
+        """Create a stealth context (legacy)."""
         context = browser.new_context(user_agent=self.useragent)
         context.add_init_script(get_stealth_js())
         return context

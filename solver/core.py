@@ -30,8 +30,6 @@ import os
 import time
 from typing import Optional
 
-from patchright.sync_api import sync_playwright
-
 from solver.browser import BrowserLauncher
 from solver.constants import BROWSER_TYPES, DEFAULT_UA, WIDGET_TYPES
 from solver.html_builder import build_config, render_html
@@ -244,48 +242,48 @@ class TurnstileSolver:
         )
         html = render_html(config)
 
-        from solver.stealth import get_stealth_js
-        stealth_js = get_stealth_js()
-
         t0 = time.monotonic()
-        with sync_playwright() as p:
-            browser = self._launcher.launch(p, proxy=proxy)
-            t_launch = time.monotonic()
-            try:
-                page = browser.new_page()
-                page.add_init_script(stealth_js)
-                url_with_slash = url if url.endswith("/") else url + "/"
-                page.route(
-                    url_with_slash,
-                    lambda route: route.fulfill(
-                        body=html,
-                        status=200,
-                        content_type="text/html; charset=utf-8",
-                    ),
-                )
-                page.goto(url_with_slash, timeout=self.timeout * 1000)
-                t_goto = time.monotonic()
+        # Reuse the persistent browser — no per-solve launch overhead.
+        page = self._launcher.new_page(proxy=proxy)
+        t_page = time.monotonic()
+        try:
+            url_with_slash = url if url.endswith("/") else url + "/"
+            page.route(
+                url_with_slash,
+                lambda route: route.fulfill(
+                    body=html,
+                    status=200,
+                    content_type="text/html; charset=utf-8",
+                ),
+            )
+            page.goto(url_with_slash, timeout=self.timeout * 1000)
+            t_goto = time.monotonic()
 
-                token = wait_for_token(
-                    page, timeout=self.timeout, widget_type=widget_type,
-                )
-                t_token = time.monotonic()
-                ua = extract_useragent(page)
-                logger.info(
-                    "solve_timing launch=%dms goto=%dms token_wait=%dms total=%dms",
-                    int((t_launch - t0) * 1000),
-                    int((t_goto - t_launch) * 1000),
-                    int((t_token - t_goto) * 1000),
-                    int((t_token - t0) * 1000),
-                )
-                if not token:
-                    raise RuntimeError("token_empty_after_wait")
-                return token, ua
-            finally:
-                try:
-                    browser.close()
-                except Exception:  # noqa: BLE001
-                    pass
+            token = wait_for_token(
+                page, timeout=self.timeout, widget_type=widget_type,
+            )
+            t_token = time.monotonic()
+            ua = extract_useragent(page)
+            logger.info(
+                "solve_timing page_create=%dms goto=%dms token_wait=%dms total=%dms",
+                int((t_page - t0) * 1000),
+                int((t_goto - t_page) * 1000),
+                int((t_token - t_goto) * 1000),
+                int((t_token - t0) * 1000),
+            )
+            if not token:
+                raise RuntimeError("token_empty_after_wait")
+            return token, ua
+        finally:
+            try:
+                # Close the context if this page was created with a proxy.
+                ctx = getattr(page, "_stealth_context", None)
+                if ctx:
+                    ctx.close()
+                else:
+                    page.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ---------------------------------------------------------------------------
