@@ -113,29 +113,44 @@ class BrowserLauncher:
     def new_page(self, proxy: Optional[str] = None) -> Page:
         """Create a new page in the persistent browser.
 
-        For solves without a proxy, uses ``browser.new_page()`` directly
-        (fastest path, ~50ms).  For solves with a proxy, creates a new
-        context with the proxy and returns a page from it (~200ms).
-
-        Stealth JS is injected via ``page.add_init_script()`` in both cases.
+        If the browser has crashed (TargetClosedError), automatically
+        restarts it and retries once.
         """
-        browser = self._ensure_browser()
         stealth_js = get_stealth_js()
+        last_err: Optional[Exception] = None
 
-        if proxy:
-            context = browser.new_context(
-                user_agent=self.useragent,
-                proxy=self.parse_proxy(proxy),
-            )
-            page = context.new_page()
-            page.add_init_script(stealth_js)
-            # Tag the page so _solve_once can close the context too.
-            page._stealth_context = context  # type: ignore[attr-defined]
-        else:
-            page = browser.new_page()
-            page.add_init_script(stealth_js)
+        for attempt in range(2):  # Try, restart on failure, try again.
+            browser = self._ensure_browser()
+            try:
+                if proxy:
+                    context = browser.new_context(
+                        user_agent=self.useragent,
+                        proxy=self.parse_proxy(proxy),
+                    )
+                    page = context.new_page()
+                    page.add_init_script(stealth_js)
+                    page._stealth_context = context  # type: ignore[attr-defined]
+                else:
+                    page = browser.new_page()
+                    page.add_init_script(stealth_js)
+                return page
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    "new_page_failed attempt=%d error=%s",
+                    attempt + 1, str(e)[:120],
+                )
+                # Force-restart the browser.
+                self._browser = None
+                if self._playwright:
+                    try:
+                        self._playwright.stop()
+                    except Exception:
+                        pass
+                    self._playwright = None
+                # Second attempt will call _ensure_browser() which starts fresh.
 
-        return page
+        raise RuntimeError(f"new_page failed after restart: {last_err}")
 
     def stop(self) -> None:
         """Close the persistent browser and stop playwright."""
