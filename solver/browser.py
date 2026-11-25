@@ -1,17 +1,19 @@
 """Browser lifecycle management for the Turnstile solver.
 
-Wraps patchright's Chromium launch with the configuration that defeats
-Cloudflare's bot detection:
+Wraps patchright's Chromium launch with stealth configuration:
 
-* ``channel="chrome"`` — use the system Google Chrome binary (real
-  fingerprint) rather than Playwright's bundled Chromium.
-* ``--user-agent=<realistic UA>`` — strip ``HeadlessChrome`` from the UA
-  string, which is an instant bot-detection signal.
-* Minimal args — only ``--no-sandbox`` (required for root) and
-  ``--user-agent``.  Extra anti-detection flags like
-  ``--disable-blink-features=AutomationControlled`` are counterproductive:
-  they themselves become fingerprints.  Patchright handles
-  ``navigator.webdriver`` and CDP stealth internally.
+* ``channel="chrome"`` — system Google Chrome binary (real fingerprint).
+* ``--user-agent=<realistic UA>`` — strips ``HeadlessChrome``.
+* **Stealth launch args** from ``solver.stealth`` — disables automation
+  signals at the Blink/IPC level.
+* **Stealth JS injection** via ``context.add_init_script()`` — patches
+  ``navigator.webdriver``, plugins, languages, WebGL, chrome.runtime,
+  connection, hardwareConcurrency, deviceMemory, canvas, shadow DOM,
+  offsetHeight, and Function.toString BEFORE any page loads.
+
+The stealth JS is the single biggest speed win: without it, Turnstile
+detects automation and silently retries/rejects, adding 5-10s of wasted
+time.  With it, the widget solves on the first attempt.
 """
 
 from __future__ import annotations
@@ -20,9 +22,10 @@ import logging
 from typing import Any, Dict, Optional
 from urllib.parse import unquote, urlparse
 
-from patchright.sync_api import Browser
+from patchright.sync_api import Browser, BrowserContext
 
 from solver.constants import BROWSER_TYPES, DEFAULT_UA
+from solver.stealth import get_launch_args, get_stealth_js
 
 logger = logging.getLogger("solver.browser")
 
@@ -30,9 +33,9 @@ logger = logging.getLogger("solver.browser")
 class BrowserLauncher:
     """Configures and launches a patchright Chromium browser instance.
 
-    Created once per solver and reused across attempts.  The actual browser
-    process is created fresh per attempt (inside a ``sync_playwright()``
-    context manager) to avoid state leakage between solves.
+    The launcher is created once per solver.  Each ``launch()`` call
+    starts a fresh browser process; ``new_context()`` creates a context
+    with stealth JS pre-injected.
     """
 
     def __init__(
@@ -55,18 +58,8 @@ class BrowserLauncher:
             self.browser_type = "chromium"
 
     def launch(self, playwright, proxy: Optional[str] = None) -> Browser:
-        """Launch a browser instance.
-
-        Parameters
-        ----------
-        playwright:
-            A running ``sync_playwright()`` context manager.
-        proxy:
-            Optional proxy URL (``http://``, ``https://``, ``socks5://``).
-            Credentials: ``http://user:pass@host:port``.
-        """
-        # Minimal args — patchright handles anti-detection internally.
-        launch_args = ["--no-sandbox"]
+        """Launch a browser with stealth args."""
+        launch_args = get_launch_args()
         if self.useragent:
             launch_args.append(f"--user-agent={self.useragent}")
 
@@ -77,29 +70,33 @@ class BrowserLauncher:
         if self.browser_path:
             launch_opts["executable_path"] = self.browser_path
         elif self.browser_type == "chrome":
-            # System Google Chrome — real binary, best stealth.
             launch_opts["channel"] = "chrome"
         elif self.browser_type == "msedge":
             launch_opts["channel"] = "msedge"
-        # browser_type == "chromium" → patchright's patched build (fallback)
 
         if proxy:
             launch_opts["proxy"] = self.parse_proxy(proxy)
 
         logger.info(
-            "browser_launch headless=%s type=%s proxy=%s",
-            self.headless, self.browser_type, bool(proxy),
+            "browser_launch headless=%s type=%s proxy=%s stealth_args=%d",
+            self.headless, self.browser_type, bool(proxy), len(launch_args),
         )
         return playwright.chromium.launch(**launch_opts)
 
+    def new_context(self, browser: Browser) -> BrowserContext:
+        """Create a browser context with stealth JS pre-injected.
+
+        The stealth JS runs via ``add_init_script()`` which executes before
+        any page's own JavaScript, so Cloudflare's challenge script never
+        sees automation fingerprints.
+        """
+        context = browser.new_context(user_agent=self.useragent)
+        context.add_init_script(get_stealth_js())
+        return context
+
     @staticmethod
     def parse_proxy(proxy_url: str) -> dict:
-        """Convert a proxy URL string into patchright's proxy dict.
-
-        Accepts ``http://``, ``https://``, ``socks5://``, ``socks5h://``
-        with optional credentials: ``scheme://user:pass@host:port``.
-        Bare ``host:port`` is treated as HTTP.
-        """
+        """Convert a proxy URL string into patchright's proxy dict."""
         if not any(proxy_url.startswith(s) for s in
                    ("http://", "https://", "socks5://", "socks5h://")):
             proxy_url = f"http://{proxy_url}"

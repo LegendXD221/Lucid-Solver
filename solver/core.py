@@ -36,7 +36,7 @@ from solver.browser import BrowserLauncher
 from solver.constants import BROWSER_TYPES, DEFAULT_UA, WIDGET_TYPES
 from solver.html_builder import build_config, render_html
 from solver.models import SolveResult
-from solver.token_poller import extract_useragent, wait_for_token
+from solver.token_poller import extract_useragent, get_cf_clearance, wait_for_token
 from solver.utils import env_bool
 
 logger = logging.getLogger("solver.core")
@@ -71,14 +71,17 @@ class TurnstileSolver:
     def __init__(
         self,
         headless: bool = True,
-        max_retries: int = 3,
-        timeout: int = 30,
+        max_retries: int = 2,
+        timeout: int = 15,
         useragent: Optional[str] = None,
         browser_type: str = "chrome",
         browser_path: Optional[str] = None,
     ) -> None:
         self.headless = env_bool("HEADLESS", headless)
         self.max_retries = int(os.getenv("MAX_RETRIES", max_retries))
+        # Reduced from 30s to 15s per attempt — stealth JS + cursor clicking
+        # makes the widget solve on the first try, so we don't need long
+        # timeouts.  2 retries × 15s = 30s worst case, but typical is 5-10s.
         self.timeout = int(os.getenv("SOLVE_TIMEOUT", timeout))
         self.useragent = useragent or os.getenv("USER_AGENT") or DEFAULT_UA
         self.browser_type = os.getenv("BROWSER_TYPE", browser_type) or "chrome"
@@ -245,10 +248,11 @@ class TurnstileSolver:
         with sync_playwright() as p:
             browser = self._launcher.launch(p, proxy=proxy)
             try:
-                page = browser.new_page()
-                # Route interception: serve our HTML when the browser
-                # navigates to the target URL.  Cloudflare sees the
-                # correct origin.
+                # Use a stealth context (stealth JS pre-injected via
+                # add_init_script) so Cloudflare never sees automation.
+                context = self._launcher.new_context(browser)
+                page = context.new_page()
+                # Route interception: serve our HTML at the target URL.
                 url_with_slash = url if url.endswith("/") else url + "/"
                 page.route(
                     url_with_slash,
