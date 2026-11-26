@@ -167,8 +167,12 @@ class TurnstileSolver:
             page = await launcher.new_page(proxy=proxy)
             t_page = time.monotonic()
             url_with_slash = url if url.endswith("/") else url + "/"
-            await page.route(url_with_slash, lambda route: route.fulfill(
-                body=html, status=200, content_type="text/html; charset=utf-8"))
+            # Async route handler — sync lambdas don't work properly in async
+            # Playwright (route.fulfill() coroutine never gets awaited).
+            async def _route_handler(route):
+                await route.fulfill(
+                    body=html, status=200, content_type="text/html; charset=utf-8")
+            await page.route(url_with_slash, _route_handler)
             await page.goto(url_with_slash, timeout=self.timeout * 1000)
             t_goto = time.monotonic()
 
