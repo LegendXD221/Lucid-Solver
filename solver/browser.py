@@ -60,14 +60,14 @@ class BrowserLauncher:
         return pw.chromium.launch(**opts)
 
     def new_page(self, proxy: Optional[str] = None) -> Page:
-        """Create a page with stealth JS. Auto-restarts on crash."""
-        sjs = get_stealth_js()
+        """Create a page. Auto-restarts on crash."""
         last_err = None
         for attempt in range(2):
             browser = self._ensure_browser()
             try:
                 page = browser.new_page()
-                page.add_init_script(sjs)
+                # NOTE: stealth JS injection removed — it was breaking the
+                # Turnstile widget.  System Chrome + realistic UA is sufficient.
                 return page
             except Exception as e:
                 last_err = e
