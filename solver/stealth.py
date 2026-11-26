@@ -31,7 +31,7 @@ from typing import List
 # ---------------------------------------------------------------------------
 
 STEALTH_JS = """
-() => {
+(function() {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 
     Object.defineProperty(navigator, 'plugins', {
@@ -123,7 +123,7 @@ STEALTH_JS = """
         }
         return originalToString.call(this);
     };
-}
+})();
 """
 
 # ---------------------------------------------------------------------------
