@@ -280,12 +280,6 @@ class StatsResponse(BaseModel):
     last_solve: Optional[Dict[str, Any]] = None
 
 
-class ChallengeRequest(BaseModel):
-    url: str = Field(..., description="Target URL with a Cloudflare managed challenge.")
-    proxy: Optional[str] = Field(None, description="Per-request proxy override.")
-    timeout: Optional[int] = Field(None, description="Override the default challenge timeout (seconds).")
-
-
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -319,20 +313,12 @@ def create_app() -> FastAPI:
     @app.get("/health", response_model=HealthResponse, tags=["meta"])
     async def health() -> HealthResponse:
         snap = metrics.snapshot()
-        solver = get_solver()
-        pool = solver.pool_status
         return HealthResponse(
             status="ok",
             uptime=round(snap["uptime_s"], 2),
             solves_total=snap["solves_total"],
             auth_enabled=_API_KEY is not None,
         )
-
-    @app.get("/pool", tags=["meta"])
-    async def pool_status(_: None = Depends(_verify_api_key)):
-        """Return the current browser pool status (available/busy/total)."""
-        solver = get_solver()
-        return solver.pool_status
 
     @app.get("/stats", response_model=StatsResponse, tags=["meta"])
     async def stats(_: None = Depends(_verify_api_key)) -> StatsResponse:
@@ -355,40 +341,50 @@ def create_app() -> FastAPI:
         tags=["solver"],
         dependencies=[Depends(_verify_api_key)],
     )
-    async def solve(req: SolveRequest) -> SolveResponse:
+    # NOTE: ``def`` (not ``async def``) — FastAPI runs sync endpoints in a
+    # threadpool, which is the correct model for sync patchright calls.
+    def solve(req: SolveRequest) -> SolveResponse:
         proxy = req.proxy
         if not proxy and req.use_pool_proxy:
             proxy = proxy_manager.rotate()
             if proxy is None:
                 logger.warning("pool_proxy_requested_but_empty")
 
-        logger.info("solve_request", extra={"url": req.url, "sitekey": req.sitekey[:10]+"...", "widget_type": req.widget_type})
+        logger.info(
+            "solve_request",
+            extra={
+                "url": req.url,
+                "sitekey": req.sitekey[:10] + "...",
+                "widget_type": req.widget_type,
+                "theme": req.theme,
+                "size": req.size,
+                "proxy": bool(proxy),
+            },
+        )
 
         solver = get_solver()
-        try:
-            result = await solver.solve(
-                url=req.url, sitekey=req.sitekey, proxy=proxy,
-                widget_type=req.widget_type, action=req.action, cdata=req.cdata,
-                theme=req.theme, size=req.size, language=req.language,
-                appearance=req.appearance, execution=req.execution,
-            )
-        except TimeoutError as e:
-            logger.warning("solve_queue_timeout error=%s", str(e))
-            return JSONResponse(status_code=503, content={"status": "failed", "error": f"all browsers busy: {e}", "elapsed_ms": 0})
+        result = solver.solve(
+            url=req.url,
+            sitekey=req.sitekey,
+            proxy=proxy,
+            widget_type=req.widget_type,
+            action=req.action,
+            cdata=req.cdata,
+            theme=req.theme,
+            size=req.size,
+            language=req.language,
+            appearance=req.appearance,
+            execution=req.execution,
+        )
         metrics.record(result)
-        if result.get("status") != "success":
-            return JSONResponse(status_code=502, content=SolveResponse(**result).model_dump())
-        return SolveResponse(**result)
 
-    @app.post("/challenge", tags=["solver"], dependencies=[Depends(_verify_api_key)])
-    async def challenge(req: ChallengeRequest) -> JSONResponse:
-        solver = get_solver()
-        try:
-            result = await solver.challenge(url=req.url, proxy=req.proxy)
-        except TimeoutError as e:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": f"all browsers busy: {e}"})
-        code = 200 if result.get("status") == "success" else 502
-        return JSONResponse(status_code=code, content=result)
+        status = result.get("status", "failed")
+        if status != "success":
+            return JSONResponse(
+                status_code=502,
+                content=SolveResponse(**result).model_dump(),
+            )
+        return SolveResponse(**result)
 
     @app.get("/", tags=["meta"], response_class=HTMLResponse)
     async def root() -> HTMLResponse:
