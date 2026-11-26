@@ -22,11 +22,13 @@ _MIN_TOKEN_LEN = 20
 
 
 async def wait_for_token(page: Page, timeout: int, widget_type: str) -> Optional[str]:
-    """Poll for a Turnstile token with a single upfront widget click."""
+    """Poll for a Turnstile token with retry clicks."""
     deadline = asyncio.get_event_loop().time() + timeout
+    last_click = 0.0
+    click_cooldown = 3.0  # retry click every 3s if no token
 
-    if widget_type != "invisible":
-        await _try_click_widget(page)
+    # Give the widget time to render before first click.
+    await asyncio.sleep(1.0)
 
     while asyncio.get_event_loop().time() < deadline:
         token = await _eval_token(page)
@@ -36,6 +38,12 @@ async def wait_for_token(page: Page, timeout: int, widget_type: str) -> Optional
         if token:
             return token
         await _check_error(page)
+
+        # Click the widget periodically (not just once).
+        if widget_type != "invisible" and (asyncio.get_event_loop().time() - last_click) > click_cooldown:
+            await _try_click_widget(page)
+            last_click = asyncio.get_event_loop().time()
+
         await asyncio.sleep(_POLL_INTERVAL_S)
 
     return None

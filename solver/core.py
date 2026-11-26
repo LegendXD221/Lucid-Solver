@@ -37,7 +37,7 @@ class TurnstileSolver:
         self,
         headless: bool = True,
         max_retries: int = 2,
-        timeout: int = 15,
+        timeout: int = 20,
         useragent: Optional[str] = None,
         browser_type: str = "chrome",
         browser_path: Optional[str] = None,
