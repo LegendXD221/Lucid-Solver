@@ -27,9 +27,9 @@ import logging
 import os
 import random
 import time
+import urllib.request
+import urllib.error
 from typing import List, Optional
-
-import httpx
 
 from patchright.sync_api import sync_playwright
 
@@ -52,7 +52,7 @@ _DEMO_HTML = (
 def _call_gemini(api_key: str, image_b64: str, prompt: str) -> str:
     """Call the Gemini REST API with an image and prompt. Returns text response."""
     url = f"{GEMINI_API_URL}?key={api_key}"
-    payload = {
+    payload = json.dumps({
         "contents": [{
             "parts": [
                 {"text": prompt},
@@ -60,13 +60,11 @@ def _call_gemini(api_key: str, image_b64: str, prompt: str) -> str:
             ]
         }],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 100},
-    }
+    }).encode()
     try:
-        with httpx.Client(timeout=15) as client:
-            resp = client.post(url, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            # Extract text from response
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
             candidates = data.get("candidates", [])
             if candidates:
                 parts = candidates[0].get("content", {}).get("parts", [])
