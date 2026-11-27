@@ -11,23 +11,30 @@ with sync_playwright() as p:
     ])
     page = b.new_page()
     print(f"navigating to {URL}...", flush=True)
-    # Use domcontentloaded — much faster than "load" for challenge pages.
-    page.goto(URL, timeout=45000, wait_until="domcontentloaded")
-    print(f"DOM loaded. title: {page.title()[:60]}", flush=True)
+    # "commit" returns as soon as the navigation request is sent — doesn't
+    # wait for the page to load. The challenge runs in the background.
+    try:
+        page.goto(URL, timeout=10000, wait_until="commit")
+        print("navigation started", flush=True)
+    except Exception as e:
+        print(f"goto (expected): {str(e)[:60]}", flush=True)
 
-    # Wait for cf_clearance cookie (challenge auto-resolves in background)
-    for i in range(45):
+    # Poll for cf_clearance cookie — the challenge auto-resolves in background
+    for i in range(40):
         time.sleep(1)
         try:
             cookies = page.context.cookies()
             for c in cookies:
                 if c.get("name") == "cf_clearance" and len(c.get("value", "")) > 20:
                     print(f"\nCF_CLEARANCE found after {i+1}s!", flush=True)
-                    print(f"cookie: {c['value'][:60]}...", flush=True)
-                    print(f"title: {page.title()[:60]}", flush=True)
-                    print(f"url: {page.url[:100]}", flush=True)
-                    body = page.evaluate("() => document.body?.innerText?.substring(0, 200) || ''")
-                    print(f"body: {body[:150]}", flush=True)
+                    print(f"cookie value: {c['value'][:60]}...", flush=True)
+                    try:
+                        print(f"title: {page.title()[:60]}", flush=True)
+                        print(f"url: {page.url[:100]}", flush=True)
+                        body = page.evaluate("() => document.body?.innerText?.substring(0, 200) || ''")
+                        print(f"body: {body[:150]}", flush=True)
+                    except:
+                        pass
                     b.close()
                     exit(0)
         except:
@@ -39,10 +46,5 @@ with sync_playwright() as p:
             except:
                 print(f"[{i+1}s] waiting...", flush=True)
 
-    print(f"\nNO cf_clearance after 45s", flush=True)
-    try:
-        print(f"final title: {page.title()}", flush=True)
-        print(f"final url: {page.url[:100]}", flush=True)
-    except:
-        pass
+    print(f"\nNO cf_clearance after 40s", flush=True)
     b.close()
