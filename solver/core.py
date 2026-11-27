@@ -19,6 +19,7 @@ from solver.hcaptcha import (
     render_hcaptcha_html,
     wait_for_hcaptcha_token,
 )
+from solver.hcaptcha_ai import solve_hcaptcha_with_ai
 from solver.html_builder import build_config, render_html
 from solver.models import SolveResult
 from solver.token_poller import extract_useragent, wait_for_token
@@ -183,6 +184,18 @@ class TurnstileSolver:
                 "captcha_type": "hcaptcha",
                 "cached": True,
             }
+
+        # If Gemini API key is set, use the AI-powered solver (handles visual challenges).
+        if os.getenv("GEMINI_API_KEY"):
+            logger.info("hsolve_ai sitekey=%s url=%s", sitekey[:12], url[:30])
+            result = solve_hcaptcha_with_ai(url, sitekey, proxy=proxy, timeout=60)
+            if result.get("status") == "success" and result.get("token"):
+                self._cache.put(sitekey, url, "hcaptcha",
+                    result["token"], result.get("useragent", ""), result["elapsed_ms"])
+            return result
+
+        # Fallback: simple checkbox solver (no visual challenge handling).
+        logger.info("hsolve_simple sitekey=%s (no GEMINI_API_KEY)", sitekey[:12])
 
         started = time.monotonic()
         last_error = None
