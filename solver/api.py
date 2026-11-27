@@ -286,6 +286,19 @@ class ChallengeRequest(BaseModel):
     timeout: Optional[int] = Field(30, description="Challenge timeout in seconds.")
 
 
+class BatchTask(BaseModel):
+    url: str
+    sitekey: str
+    widget_type: str = "managed"
+    proxy: Optional[str] = None
+    action: Optional[str] = None
+    cdata: Optional[str] = None
+
+
+class BatchSolveRequest(BaseModel):
+    tasks: list = Field(..., description="List of {url, sitekey, widget_type} objects.")
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -409,6 +422,31 @@ def create_app() -> FastAPI:
         result = solver.challenge(url=req.url, proxy=req.proxy, timeout=req.timeout or 30)
         code = 200 if result.get("status") == "success" else 502
         return JSONResponse(status_code=code, content=result)
+
+    @app.post("/solve/batch", tags=["solver"], dependencies=[Depends(_verify_api_key)])
+    def solve_batch(req: 'BatchSolveRequest') -> JSONResponse:
+        """Solve multiple Turnstile challenges at once.
+
+        Body: ``{"tasks": [{"url":"...","sitekey":"0x4AAA..."}, ...]}``
+        Returns a list of results in the same order. Cache hits return instantly.
+        """
+        solver = get_solver()
+        results = solver.solve_batch(req.tasks)
+        return JSONResponse(status_code=200, content={"results": results})
+
+    @app.post("/cache/clear", tags=["meta"], dependencies=[Depends(_verify_api_key)])
+    def clear_cache() -> dict:
+        """Clear the token cache."""
+        solver = get_solver()
+        solver._cache.clear()
+        return {"status": "cleared", "cache": solver.cache_stats}
+
+    @app.post("/prewarm", tags=["meta"], dependencies=[Depends(_verify_api_key)])
+    def prewarm() -> dict:
+        """Start the browser immediately so the next solve is fast."""
+        solver = get_solver()
+        solver.prewarm()
+        return {"status": "prewarmed", "browser_alive": solver.browser_alive}
 
     @app.get("/", tags=["meta"], response_class=HTMLResponse)
     async def root() -> HTMLResponse:
