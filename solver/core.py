@@ -148,7 +148,10 @@ class TurnstileSolver:
         finally:
             try: page.unroute(url_with_slash)
             except: pass
-            try: page.close()
+            try:
+                ctx = getattr(page, "_stealth_context", None)
+                if ctx: ctx.close()
+                else: page.close()
             except: pass
 
 

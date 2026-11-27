@@ -60,14 +60,28 @@ class BrowserLauncher:
         return pw.chromium.launch(**opts)
 
     def new_page(self, proxy: Optional[str] = None) -> Page:
-        """Create a page. Auto-restarts on crash."""
+        """Create a page. Auto-restarts on crash.
+
+        If ``proxy`` is ``"auto"``, uses the local SOCKS5 forwarder
+        (socks5://127.0.0.1:10800) which routes through the webshare
+        rotating proxy pool for a fresh IP.
+        """
+        # "auto" proxy → local SOCKS5 forwarder (no auth needed)
+        if proxy == "auto":
+            proxy = "socks5://127.0.0.1:10800"
         last_err = None
         for attempt in range(2):
             browser = self._ensure_browser()
             try:
-                page = browser.new_page()
-                # NOTE: stealth JS injection removed — it was breaking the
-                # Turnstile widget.  System Chrome + realistic UA is sufficient.
+                if proxy:
+                    ctx = browser.new_context(
+                        user_agent=self.useragent,
+                        proxy=self.parse_proxy(proxy),
+                    )
+                    page = ctx.new_page()
+                    page._stealth_context = ctx  # type: ignore[attr-defined]
+                else:
+                    page = browser.new_page()
                 return page
             except Exception as e:
                 last_err = e
