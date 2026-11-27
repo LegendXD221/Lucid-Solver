@@ -316,15 +316,19 @@ def create_app() -> FastAPI:
         )
         return response
 
-    @app.get("/health", response_model=HealthResponse, tags=["meta"])
-    async def health() -> HealthResponse:
+    @app.get("/health", tags=["meta"])
+    async def health():
+        """Comprehensive health check — browser, cache, proxy status."""
         snap = metrics.snapshot()
-        return HealthResponse(
-            status="ok",
-            uptime=round(snap["uptime_s"], 2),
-            solves_total=snap["solves_total"],
-            auth_enabled=_API_KEY is not None,
-        )
+        solver = get_solver()
+        return {
+            "status": "ok",
+            "uptime": round(snap["uptime_s"], 2),
+            "solves_total": snap["solves_total"],
+            "auth_enabled": _API_KEY is not None,
+            "browser_alive": solver.browser_alive,
+            "cache": solver.cache_stats,
+        }
 
     @app.get("/stats", response_model=StatsResponse, tags=["meta"])
     async def stats(_: None = Depends(_verify_api_key)) -> StatsResponse:

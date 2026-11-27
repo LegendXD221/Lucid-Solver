@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging, os, time, threading
 from typing import Optional
 from solver.browser import BrowserLauncher
+from solver.cache import TokenCache
 from solver.constants import BROWSER_TYPES, DEFAULT_UA, WIDGET_TYPES
 from solver.html_builder import build_config, render_html
 from solver.models import SolveResult
@@ -36,8 +37,8 @@ class TurnstileSolver:
         self._launcher = BrowserLauncher(
             headless=self.headless, useragent=self.useragent,
             browser_type=self.browser_type, browser_path=self.browser_path)
-        # Serialize solves within this worker to prevent greenlet/asyncio conflict.
         self._lock = threading.Lock()
+        self._cache = TokenCache()
         logger.info("solver_initialized retries=%d timeout=%d browser=%s",
                      self.max_retries, self.timeout, self.browser_type)
 
@@ -48,10 +49,28 @@ class TurnstileSolver:
             raise ValueError(f"widget_type must be one of {self.WIDGET_TYPES}")
         if not sitekey: raise ValueError("sitekey is required")
         if not url: raise ValueError("url is required")
+        # Check token cache first — repeated solves return instantly.
+        cached = self._cache.get(sitekey, url, widget_type)
+        if cached:
+            logger.info("cache_hit sitekey=%s url=%s", sitekey[:10]+"...", url[:30])
+            return {
+                "token": cached.token,
+                "elapsed_ms": 0,
+                "useragent": cached.useragent,
+                "status": "success",
+                "attempts": 0,
+                "widget_type": widget_type,
+                "cached": True,
+            }
         # Lock prevents concurrent sync Playwright calls in the same worker.
         with self._lock:
-            return self._solve_locked(url, sitekey, proxy, widget_type, action,
+            result = self._solve_locked(url, sitekey, proxy, widget_type, action,
                 cdata, theme, size, language, appearance, execution)
+        # Cache the result if successful.
+        if result.get("status") == "success" and result.get("token"):
+            self._cache.put(sitekey, url, widget_type,
+                result["token"], result.get("useragent", ""), result["elapsed_ms"])
+        return result
 
     def _solve_locked(self, url, sitekey, proxy, widget_type, action, cdata,
                       theme, size, language, appearance, execution) -> dict:
@@ -81,6 +100,47 @@ class TurnstileSolver:
         return SolveResult(token=None, elapsed_ms=elapsed_ms, useragent=last_ua,
             status="failed", attempts=self.max_retries, error=last_error,
             proxy_used=proxy, widget_type=widget_type).to_dict()
+
+    def solve_batch(self, tasks: list) -> list:
+        """Solve multiple Turnstile challenges. Checks cache first for each.
+
+        ``tasks`` is a list of dicts with url, sitekey, widget_type, etc.
+        Returns a list of results in the same order.
+        """
+        results = []
+        for task in tasks:
+            try:
+                r = self.solve(
+                    url=task.get("url", ""),
+                    sitekey=task.get("sitekey", ""),
+                    proxy=task.get("proxy"),
+                    widget_type=task.get("widget_type", "managed"),
+                    action=task.get("action"),
+                    cdata=task.get("cdata"),
+                )
+                results.append(r)
+            except Exception as e:
+                results.append({"status": "failed", "error": str(e), "elapsed_ms": 0})
+        return results
+
+    @property
+    def cache_stats(self) -> dict:
+        return self._cache.stats()
+
+    @property
+    def browser_alive(self) -> bool:
+        try:
+            return self._launcher._browser is not None and self._launcher._browser.is_connected()
+        except:
+            return False
+
+    def prewarm(self) -> None:
+        """Start the browser immediately so the first solve is fast."""
+        try:
+            self._launcher._ensure_browser()
+            logger.info("browser_prewarmed")
+        except Exception as e:
+            logger.warning("prewarm_failed: %s", str(e)[:80])
 
     def challenge(self, url, proxy=None, timeout=30):
         """Bypass a Cloudflare managed challenge page.
