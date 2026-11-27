@@ -299,6 +299,14 @@ class BatchSolveRequest(BaseModel):
     tasks: list = Field(..., description="List of {url, sitekey, widget_type} objects.")
 
 
+class HSolveRequest(BaseModel):
+    url: str = Field(..., description="Target URL registered with the hCaptcha sitekey.")
+    sitekey: str = Field(..., description="hCaptcha sitekey (UUID format).")
+    proxy: Optional[str] = Field(None, description="Per-request proxy override ('auto' for SOCKS5).")
+    theme: str = Field("light", description="Widget theme: light or dark.")
+    size: str = Field("normal", description="Widget size: normal, compact, or invisible.")
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -422,6 +430,23 @@ def create_app() -> FastAPI:
         result = solver.challenge(url=req.url, proxy=req.proxy, timeout=req.timeout or 30)
         code = 200 if result.get("status") == "success" else 502
         return JSONResponse(status_code=code, content=result)
+
+    @app.post("/hsolve", tags=["solver"], dependencies=[Depends(_verify_api_key)])
+    def hsolve(req: 'HSolveRequest') -> JSONResponse:
+        """Solve an hCaptcha challenge.
+
+        Body: ``{"url": "https://example.com", "sitekey": "10000000-ffff-ffff-ffff-000000000001"}``
+
+        Returns: ``{"token": "...", "elapsed_ms": 4200, "status": "success", "captcha_type": "hcaptcha"}``
+        """
+        solver = get_solver()
+        result = solver.hsolve(
+            url=req.url, sitekey=req.sitekey,
+            proxy=req.proxy, theme=req.theme, size=req.size,
+        )
+        if result.get("status") == "success":
+            return JSONResponse(status_code=200, content=result)
+        return JSONResponse(status_code=502, content=result)
 
     @app.post("/solve/batch", tags=["solver"], dependencies=[Depends(_verify_api_key)])
     def solve_batch(req: 'BatchSolveRequest') -> JSONResponse:

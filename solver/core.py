@@ -14,6 +14,11 @@ from typing import Optional
 from solver.browser import BrowserLauncher
 from solver.cache import TokenCache
 from solver.constants import BROWSER_TYPES, DEFAULT_UA, WIDGET_TYPES
+from solver.hcaptcha import (
+    extract_hcaptcha_useragent,
+    render_hcaptcha_html,
+    wait_for_hcaptcha_token,
+)
 from solver.html_builder import build_config, render_html
 from solver.models import SolveResult
 from solver.token_poller import extract_useragent, wait_for_token
@@ -141,6 +146,117 @@ class TurnstileSolver:
             logger.info("browser_prewarmed")
         except Exception as e:
             logger.warning("prewarm_failed: %s", str(e)[:80])
+
+    # ------------------------------------------------------------------ #
+    # hCaptcha solver
+    # ------------------------------------------------------------------ #
+    def hsolve(self, url, sitekey, proxy=None, theme="light", size="normal") -> dict:
+        """Solve an hCaptcha challenge.
+
+        Uses the same route-interception technique as ``solve()`` but
+        loads the hCaptcha widget instead of Turnstile.  Returns the
+        ``h-captcha-response`` token.
+
+        Parameters
+        ----------
+        url: Target URL registered with the hCaptcha sitekey.
+        sitekey: hCaptcha sitekey (UUID format, e.g. ``10000000-ffff-...``).
+        proxy: Optional proxy (``"auto"`` for SOCKS5 forwarder).
+        theme: ``light`` or ``dark``.
+        size: ``normal``, ``compact``, or ``invisible``.
+        """
+        if not sitekey:
+            raise ValueError("sitekey is required")
+        if not url:
+            raise ValueError("url is required")
+
+        # Check cache.
+        cached = self._cache.get(sitekey, url, "hcaptcha")
+        if cached:
+            logger.info("hcaptcha_cache_hit sitekey=%s", sitekey[:12])
+            return {
+                "token": cached.token,
+                "elapsed_ms": 0,
+                "useragent": cached.useragent,
+                "status": "success",
+                "attempts": 0,
+                "captcha_type": "hcaptcha",
+                "cached": True,
+            }
+
+        started = time.monotonic()
+        last_error = None
+        last_ua = None
+
+        for attempt in range(1, self.max_retries + 1):
+            logger.info("hsolve_attempt %d/%d url=%s", attempt, self.max_retries, url[:30])
+            try:
+                token, ua = self._hsolve_once(url, sitekey, proxy, theme, size)
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                logger.info("hsolve_success attempt=%d elapsed_ms=%d", attempt, elapsed_ms)
+                result = {
+                    "token": token,
+                    "elapsed_ms": elapsed_ms,
+                    "useragent": ua,
+                    "status": "success",
+                    "attempts": attempt,
+                    "captcha_type": "hcaptcha",
+                    "proxy_used": proxy,
+                }
+                self._cache.put(sitekey, url, "hcaptcha", token, ua, elapsed_ms)
+                return result
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                last_ua = getattr(exc, "useragent", None) or last_ua
+                logger.warning("hsolve_attempt_failed %d error=%s", attempt, last_error[:80])
+                if attempt < self.max_retries:
+                    time.sleep(min(2.0 * attempt, 5.0))
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        return {
+            "token": None,
+            "elapsed_ms": elapsed_ms,
+            "useragent": last_ua,
+            "status": "failed",
+            "attempts": self.max_retries,
+            "captcha_type": "hcaptcha",
+            "error": last_error,
+            "proxy_used": proxy,
+        }
+
+    def _hsolve_once(self, url, sitekey, proxy, theme, size) -> tuple:
+        """Single hCaptcha solve attempt."""
+        html = render_hcaptcha_html(sitekey, theme=theme, size=size)
+        t0 = time.monotonic()
+        page = self._launcher.new_page(proxy=proxy)
+        try:
+            url_with_slash = url if url.endswith("/") else url + "/"
+            page.route(url_with_slash, lambda route: route.fulfill(
+                body=html, status=200, content_type="text/html; charset=utf-8"))
+            page.goto(url_with_slash, timeout=self.timeout * 1000)
+            t_goto = time.monotonic()
+            token = wait_for_hcaptcha_token(page, timeout=self.timeout)
+            t_token = time.monotonic()
+            ua = extract_hcaptcha_useragent(page)
+            logger.info("hsolve_timing page=%dms goto=%dms token=%dms total=%dms",
+                int((t0 - t0) * 1000), int((t_goto - t0) * 1000),
+                int((t_token - t_goto) * 1000), int((t_token - t0) * 1000))
+            if not token:
+                raise RuntimeError("hcaptcha_token_empty_after_wait")
+            return token, ua
+        finally:
+            try:
+                page.unroute(url_with_slash)
+            except:
+                pass
+            try:
+                ctx = getattr(page, "_stealth_context", None)
+                if ctx:
+                    ctx.close()
+                else:
+                    page.close()
+            except:
+                pass
 
     def challenge(self, url, proxy=None, timeout=30):
         """Bypass a Cloudflare managed challenge page.
