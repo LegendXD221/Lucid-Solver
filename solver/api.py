@@ -280,6 +280,12 @@ class StatsResponse(BaseModel):
     last_solve: Optional[Dict[str, Any]] = None
 
 
+class ChallengeRequest(BaseModel):
+    url: str = Field(..., description="Target URL behind a Cloudflare managed challenge.")
+    proxy: Optional[str] = Field(None, description="Per-request proxy override.")
+    timeout: Optional[int] = Field(30, description="Challenge timeout in seconds.")
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -385,6 +391,20 @@ def create_app() -> FastAPI:
                 content=SolveResponse(**result).model_dump(),
             )
         return SolveResponse(**result)
+
+    @app.post("/challenge", tags=["solver"], dependencies=[Depends(_verify_api_key)])
+    def challenge(req: 'ChallengeRequest') -> JSONResponse:
+        """Bypass a Cloudflare managed challenge page.
+
+        Navigates to the real URL, waits for the "Just a moment..."
+        interstitial to auto-resolve, and returns cookies + final URL + title.
+
+        Body: ``{"url": "https://example.com", "proxy": null, "timeout": 30}``
+        """
+        solver = get_solver()
+        result = solver.challenge(url=req.url, proxy=req.proxy, timeout=req.timeout or 30)
+        code = 200 if result.get("status") == "success" else 502
+        return JSONResponse(status_code=code, content=result)
 
     @app.get("/", tags=["meta"], response_class=HTMLResponse)
     async def root() -> HTMLResponse:

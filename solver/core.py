@@ -82,6 +82,45 @@ class TurnstileSolver:
             status="failed", attempts=self.max_retries, error=last_error,
             proxy_used=proxy, widget_type=widget_type).to_dict()
 
+    def challenge(self, url, proxy=None, timeout=30):
+        """Bypass a Cloudflare managed challenge page.
+
+        Navigates to the real URL, waits for the "Just a moment..."
+        interstitial to auto-resolve, returns cookies + final URL + title.
+        """
+        started = time.monotonic()
+        with self._lock:
+            page = self._launcher.new_page(proxy=proxy)
+            try:
+                try:
+                    page.goto(url, timeout=10000, wait_until="commit")
+                except Exception:
+                    pass
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    time.sleep(1)
+                    cookies = page.context.cookies()
+                    has_clearance = any(c.get("name")=="cf_clearance" and len(c.get("value",""))>20 for c in cookies)
+                    try:
+                        title = page.title()
+                        is_challenge = any(x in title.lower() for x in ("just a moment","checking your browser","attention required"))
+                    except:
+                        title = ""
+                        is_challenge = True
+                    if has_clearance or (title and not is_challenge):
+                        elapsed_ms = int((time.monotonic()-started)*1000)
+                        all_cookies = [{"name":c["name"],"value":c["value"],"domain":c.get("domain",""),"path":c.get("path","/")} for c in cookies]
+                        cf_clearance = next((c["value"] for c in cookies if c.get("name")=="cf_clearance"), "")
+                        try: final_url = page.url
+                        except: final_url = url
+                        logger.info("challenge_success elapsed_ms=%d title=%s", elapsed_ms, title[:30])
+                        return {"status":"success","url":final_url,"title":title,"cookies":all_cookies,"cf_clearance":cf_clearance,"elapsed_ms":elapsed_ms}
+                elapsed_ms = int((time.monotonic()-started)*1000)
+                return {"status":"failed","error":"challenge_timeout","url":url,"elapsed_ms":elapsed_ms}
+            finally:
+                try: page.close()
+                except: pass
+
     def _solve_once(self, url, sitekey, proxy, widget_type, action, cdata,
                     theme, size, language, appearance, execution) -> tuple:
         config = build_config(sitekey=sitekey, widget_type=widget_type, action=action,
